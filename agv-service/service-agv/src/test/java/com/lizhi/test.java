@@ -2,6 +2,13 @@ package com.lizhi;
 
 import com.lizhi.domain.po.AgvShape;
 import com.lizhi.method.*;
+import com.lizhi.method.array.ArrayStack;
+import com.lizhi.method.array.BinarySearch;
+import com.lizhi.method.array.DynamicArray;
+import com.lizhi.method.heap.MinHeap1;
+import com.lizhi.method.link.*;
+import com.lizhi.method.queue.*;
+import com.lizhi.method.tree.*;
 import com.lizhi.utils.AgvCollisionAvoidance;
 import org.junit.jupiter.api.Test;
 
@@ -100,12 +107,6 @@ public class test {
         SinglyLinkedList linked = new SinglyLinkedList();
         int[] array1 = {1,2,3};
         linked.recursion(array1);
-    }
-
-    @Test
-    public void recursion(){
-        Recursion recursion = new Recursion();
-        recursion.function();
     }
 
     @Test
@@ -369,13 +370,6 @@ public class test {
         for (Object o : deque) {
             System.out.println(o);
         }
-    }
-
-    @Test
-    public void aabb(){
-        AABB aabb1 = new AABB(0,0,10,10);
-        AABB aabb2 = new AABB(11,11,10,10);
-        System.out.println(aabb1.collidesWith(aabb2));
     }
 
     @Test
