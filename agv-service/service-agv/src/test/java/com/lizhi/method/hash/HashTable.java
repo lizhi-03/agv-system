@@ -1,5 +1,7 @@
 package com.lizhi.method.hash;
 
+import cn.hutool.core.convert.Convert;
+
 public class HashTable {
 
     static class Entry{
@@ -18,7 +20,7 @@ public class HashTable {
     Entry[] table = new Entry[8];
     int size = 0;
     float loadFactor = 0.75f;
-    int threshold = (int)(table.length*loadFactor);
+    int threshold = Convert.toInt(table.length*loadFactor,0);
 
     /**
      * 根据key查找value
@@ -47,7 +49,7 @@ public class HashTable {
     void put(int hash, Object key,Object value){
         int index = hash & (table.length - 1);
         Entry p = table[index];
-        if(p != null){
+        while (p != null){
             if(p.key.equals(key)){
                 p.value = value;
                 return;
@@ -101,6 +103,11 @@ public class HashTable {
     public static void main(String[] args) {
         HashTable hashTable = new HashTable();
         hashTable.put(1,1,1);
+        hashTable.put(2,2,2);
+        hashTable.put(3,3,3);
+        hashTable.put(4,4,4);
+        hashTable.put(5,5,5);
+
     }
 
 

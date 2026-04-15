@@ -1,7 +1,6 @@
 package com.lizhi;
 
 import com.lizhi.domain.po.AgvShape;
-import com.lizhi.method.*;
 import com.lizhi.method.array.ArrayStack;
 import com.lizhi.method.array.BinarySearch;
 import com.lizhi.method.array.DynamicArray;
@@ -14,9 +13,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.assertIterableEquals;
-import static org.junit.jupiter.api.Assertions.fail;
 
 
 public class test {
