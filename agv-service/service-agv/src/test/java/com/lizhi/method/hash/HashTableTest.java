@@ -74,11 +74,11 @@ class HashTableTest {
     @Test
     @DisplayName("测试扩容功能")
     void testResize() {
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 10000; i++) {
             hashTable.put(i, "key" + i, "value" + i);
         }
 
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 10000; i++) {
             assertEquals("value" + i, hashTable.get(i, "key" + i), 
                 "扩容后应该能正确获取key" + i);
         }

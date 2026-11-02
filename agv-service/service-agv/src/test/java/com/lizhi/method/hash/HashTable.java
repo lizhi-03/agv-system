@@ -15,6 +15,11 @@ public class HashTable {
             this.key = key;
             this.value = value;
         }
+
+        public Entry() {
+        }
+
+
     }
 
     Entry[] table = new Entry[8];
@@ -49,14 +54,20 @@ public class HashTable {
     void put(int hash, Object key,Object value){
         int index = hash & (table.length - 1);
         Entry p = table[index];
+        Entry parent = null;
         while (p != null){
             if(p.key.equals(key)){
                 p.value = value;
                 return;
             }
+            parent = p;
             p = p.next;
         }
-        table[index] = new Entry(hash,key,value);
+        if (parent!= null){
+            parent.next = new Entry(hash,key,value);
+        }else {
+            table[index] = new Entry(hash,key,value);
+        }
         size++;
         if(size > threshold){
             resize();
@@ -65,14 +76,15 @@ public class HashTable {
 
     private void resize(){
         Entry[] newTable = new Entry[table.length << 1];
-        for (int i = 0; i < table.length; i++){
+        int length = table.length;
+        for (int i = 0; i < length; i++){
             Entry p = table[i];
             Entry a = null;
             Entry b = null;
             Entry aHead = null;
             Entry bHead = null;
             while (p != null){
-                if((p.hash & table.length) == 0){
+                if(p.hash < length){
                     if(a != null){
                         a.next = p;
                     }else {
@@ -98,16 +110,8 @@ public class HashTable {
                 newTable[i + table.length] = bHead;
             }
         }
-    }
-
-    public static void main(String[] args) {
-        HashTable hashTable = new HashTable();
-        hashTable.put(1,1,1);
-        hashTable.put(2,2,2);
-        hashTable.put(3,3,3);
-        hashTable.put(4,4,4);
-        hashTable.put(5,5,5);
-
+        table = newTable;
+        threshold = Convert.toInt(newTable.length*loadFactor,0);
     }
 
 

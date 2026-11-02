@@ -7,12 +7,15 @@ import com.lizhi.method.array.DynamicArray;
 import com.lizhi.method.heap.MinHeap1;
 import com.lizhi.method.link.*;
 import com.lizhi.method.queue.*;
+import com.lizhi.method.queue.ArrayDeque;
 import com.lizhi.method.tree.*;
 import com.lizhi.utils.AgvCollisionAvoidance;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+import java.util.PriorityQueue;
+
+import static com.alibaba.fastjson.JSONValidator.Type.Array;
 
 
 public class test {
@@ -505,4 +508,119 @@ public class test {
         redBlackTree.put(8,8);
         System.out.println(redBlackTree.print());
     }
+
+    @Test
+    public void test02(){
+        String c = "abcanacascw";
+        HashMap<Character,Integer> map = new HashMap<>();
+        int begin = 0;
+        for (int end = 0; end < c.length(); end++){
+            char ch = c.charAt(end);
+            if(map.containsKey(ch)){
+                begin = Math.max(map.get(ch) + 1,begin);
+                map.put(ch,end);
+            }else {
+                map.put(ch,end);
+            }
+            System.out.println(c.substring(begin,end+1));
+        }
+
+    }
+
+    @Test
+    public void test01(){
+        String a = "1,2,3";
+        List<String> b = new ArrayList<>(Arrays.asList(a.split(",")));
+        b.removeIf(code -> code.equals("201010502"));
+        b.removeIf(code -> code.equals("201010503"));
+        if (b.isEmpty()){
+            System.out.println("-----");
+        }
+    }
+
+    @Test
+    public void test(){
+        int[] nums = {1,11,2,2,3,3,3};
+        Map<Integer,Integer> cnt = new HashMap<>();
+        for(int i =0; i < nums.length; i++){
+            int x = nums[i];
+            if(cnt.containsKey(x)){
+                cnt.put(x,cnt.get(x) + 1);
+            }else{
+                cnt.put(x,1);
+            }
+        }
+        for(int k : cnt.keySet()){
+            System.out.println(k + "出现" + cnt.get(k) + "次");
+        }
+    }
+
+    static class Job implements Comparable<Job>{
+        final long time;
+        final long deadtime;
+        Job(long time,long deadtime){
+            this.time = time;
+            this.deadtime = deadtime;
+        }
+        public int compareTo(Job job){
+            return Long.compare(deadtime, job.deadtime);
+        }
+    }
+
+    @Test
+    public void test1(){
+        Scanner scanner = new Scanner(System.in);
+        int n = scanner.nextInt();
+        Job[] jobs = new Job[n];
+        for (int i = 0; i < n; i++) {
+            long t = scanner.nextLong();
+            long d = scanner.nextLong();
+            jobs[i] = new Job(t, d);
+        }
+        scanner.close();
+        Arrays.sort(jobs);
+        PriorityQueue<Long> maxHeap = new PriorityQueue<>(Collections.reverseOrder());
+        long total = 0;
+        for (Job job : jobs) {
+            total += job.time;
+            maxHeap.offer(job.time);
+            if (total > job.deadtime) {
+                total -= maxHeap.poll();
+            }
+        }
+        System.out.println(maxHeap.size());
+    }
+
+    @Test
+    public void test2(){
+        Scanner scanner = new Scanner(System.in);
+        int n = scanner.nextInt();
+        Job[] jobs = new Job[n];
+        for (int i = 0; i < n; i++){
+            long time = scanner.nextLong();
+            long deadTime = scanner.nextLong();
+            jobs[i] = new Job(time,deadTime);
+        }
+        scanner.close();
+        PriorityQueue<Long> maxHeap = new PriorityQueue<>(Collections.reverseOrder());
+        Arrays.sort(jobs);
+        long total = 0;
+        for (Job job : jobs) {
+            total = total + job.time;
+            maxHeap.offer(job.time);
+            if(job.deadtime < total){
+                total = total - maxHeap.poll();
+            }
+        }
+        System.out.println(maxHeap.size());
+        new PriorityQueue<>(Collections.reverseOrder());
+    }
+
+
+
+
+
+
+
+
 }
