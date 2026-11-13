@@ -20,12 +20,11 @@ public class AgvController {
     private final AgvService agvService;
 
     /**
-     * 动态加车
+     * 动态加车（V2）：返回本次新增的车辆编号列表（连续编号，从现有 AGVplusNNNN 最大编号 +1 开始）
      */
     @PostMapping("/batch/{mun}")
-    public Result<AgvSnapshot> batchAgv(@PathVariable Integer mun){
-        agvService.batchAgv(mun);
-        return Result.success();
+    public Result<List<String>> batchAgv(@PathVariable Integer mun){
+        return Result.success(agvService.batchAgv(mun));
     }
     /**
      * 单车遥控充电
@@ -73,6 +72,15 @@ public class AgvController {
     public Result<List<Node>> startTask(@RequestBody AgvTaskDTO agvTaskDTO) throws NoPathFoundException, InterruptedException {
         List<Node> pathList = agvService.startTask(agvTaskDTO);
         return Result.success(pathList);
+    }
+
+    /**
+     * 预览agv任务路径（V2）：只规划不落库，不产生任务、不改车辆状态、不写占用路径
+     * @param agvTaskDTO agvCode / startPoint / endPoint / currentPoint(可缺省，缺省取车辆当前位置)
+     */
+    @PostMapping("/preview")
+    public Result<List<Node>> previewTask(@RequestBody AgvTaskDTO agvTaskDTO) throws NoPathFoundException {
+        return Result.success(agvService.previewTask(agvTaskDTO));
     }
 
     /**

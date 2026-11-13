@@ -1,6 +1,26 @@
 spring:
   cloud:
     gateway:
+      # 浏览器直连 8080（dev/静态 dist 场景）时的跨域。
+      # Spring Cloud Gateway 的 RoutePredicateHandlerMapping 会接管 CORS 预检：
+      # 未配置 globalcors 时 OPTIONS 预检会被直接拒绝（403），浏览器报 CORS 错误。
+      # 这里显式放开，预检由网关直接应答；普通请求的 CORS 头仍由 service-agv 的 WebConfig 提供。
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOriginPatterns: '*'
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - PATCH
+              - OPTIONS
+              - HEAD
+            allowedHeaders: '*'
+            exposedHeaders: '*'
+            allowCredentials: false
+            maxAge: 3600
       routes:
         - id: agv
           uri: lb://service-agv
@@ -8,3 +28,6 @@ spring:
             - Path=/api/**
           filters:
             - RewritePath=/api/?(?<segment>.*), /${segment}
+            # 网关自身 CORS 与 service-agv 的 WebConfig 都会写 Access-Control-Allow-Origin，
+            # 浏览器要求该头只能有一个值；这里保留第一个，避免出现 "origin, origin" 导致 CORS 失败。
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST

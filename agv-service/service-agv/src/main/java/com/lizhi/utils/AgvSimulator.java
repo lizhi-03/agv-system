@@ -1,6 +1,7 @@
 package com.lizhi.utils;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.lizhi.astart.service.NoPathFoundException;
 import com.lizhi.domain.po.*;
 import com.lizhi.mapper.AgvMapMapper;
@@ -10,47 +11,33 @@ import com.lizhi.mapper.AgvTaskMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang.math.RandomUtils;
-import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledFuture;
 
 @Component
 @Slf4j
 @RequiredArgsConstructor
 public class AgvSimulator {
 
-    private final TaskScheduler taskScheduler;
     private final AgvConversion agvConversion;
     private final AgvUnlock agvUnlock;
     private final AgvMapMapper agvMapMapper;
     private final AgvPathMapper agvPathMapper;
     private final AgvMapper agvMapper;
     private final AgvTaskMapper agvTaskMapper;
-    private final Map<String,Runnable> jobs = new ConcurrentHashMap<>();
-    private final Map<String, ScheduledFuture<?>> scheduledTasks = new ConcurrentHashMap<>();
-
-    // 定义基础更新间隔（毫秒）
-    private static final long BASE_INTERVAL = 1000; // 1秒为基础单位
 
     /**
-     * 初始化多辆小车
-     */
-/*    @PostConstruct
-    public void startAgv(){
-        IntStream.rangeClosed(1,3)
-                .mapToObj(i->"AGV" + String.format("%03d",i))
-                .forEach(this::createAndStart);
-    }*/
-
-    /**
-     * 创建并启动一辆小车
+     * 创建一辆小车（仅写库，不再为单车注册 1s 定时任务）。
+     * 所有车辆统一由 stepJob 每秒从数据库读取并推进，避免"单车定时任务 + 全局 stepJob"双重写导致
+     * batch 车辆被写回 idle@0,0、无法稳定执行任务的问题。
      */
     public void createAndStart(String agvCode){
+        if (agvMapper.getAgv(agvCode) != null) {
+            return;
+        }
         AgvSnapshot car = AgvSnapshot.builder()
                 .AgvCode(agvCode)
                 .x(0)
@@ -64,19 +51,10 @@ public class AgvSimulator {
                 .pathIndex(0)
                 .lastUpdate(Instant.now().toString())
                 .isCharge(0)
+                .description("暂无")
                 .build();
-        Runnable job = () -> {
-            try {
-                step(car);
-            } catch (Exception e) {
-                log.error("AGV {} 执行步骤时出错: ", agvCode, e);
-            }
-        };
-        jobs.put(agvCode,job);
-        // 使用固定更新间隔
-        ScheduledFuture<?> scheduledTask = taskScheduler.scheduleAtFixedRate(job, BASE_INTERVAL);
-        scheduledTasks.put(agvCode, scheduledTask);
-        log.info("{} 启动模拟，更新间隔: {}ms", agvCode, BASE_INTERVAL);
+        agvMapper.insertAgv(car);
+        log.info("{} 已创建，将由全局 stepJob 每秒推进模拟", agvCode);
     }
 
     /**
@@ -114,9 +92,21 @@ public class AgvSimulator {
     }
 
     /**
-     * 单步更新
+     * 单步更新。
+     * <p>
+     * 方法加锁并且进入时重新从数据库读取车辆最新状态：startTask / stopAgv 等请求与每秒一次的
+     * stepJob 写同一行 agv_snapshot，若用 tick 开始时的旧快照回写，可能把刚下发的任务覆盖成
+     * idle@旧坐标（batch 新车表现为“加了车却永远停在 0,0 不执行任务”）。这里用同一把锁串行化
+     * “读-算-写”，保证任务不会被模拟器写回。
      */
-    public void step(AgvSnapshot car) throws NoPathFoundException {
+    public synchronized void step(AgvSnapshot car) throws NoPathFoundException {
+        if (car == null || car.getAgvCode() == null) {
+            return;
+        }
+        AgvSnapshot latest = agvMapper.getAgv(car.getAgvCode());
+        if (latest != null) {
+            car = latest;
+        }
         Integer taskId = car.getTaskId();
         AgvTask agvTask = new AgvTask();
         if (taskId != null){
@@ -338,14 +328,13 @@ public class AgvSimulator {
         }
     }
 
-    /** 外部调用：停止模拟并删除 */
-    public void remove(String agvId) {
-        ScheduledFuture<?> task = scheduledTasks.get(agvId);
-        if (task != null && !task.isCancelled()) {
-            task.cancel(true);
+    /** 外部调用：删除一辆车（数据库记录 + 占用路径） */
+    public synchronized void remove(String agvId) {
+        if (agvId == null || agvId.isBlank()) {
+            return;
         }
-        scheduledTasks.remove(agvId);
-        jobs.remove(agvId);
+        agvMapper.delete(new QueryWrapper<AgvSnapshot>().eq("agv_code", agvId));
+        agvPathMapper.deleteByAgvCode(agvId);
     }
 
 

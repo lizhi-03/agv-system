@@ -5,7 +5,16 @@
 <mapper namespace="com.lizhi.mapper.AgvLogMapper">
 
     <select id="pageQuery" resultType="com.lizhi.domain.po.AgvLog">
-        select * from agv_log order by timestamp desc, log_id desc
+        select * from agv_log
+        <where>
+            <if test="level != null and level != ''">
+                and level = #{level}
+            </if>
+            <if test="message != null and message != ''">
+                and message like concat('%',#{message},'%')
+            </if>
+        </where>
+        order by timestamp desc, log_id desc
     </select>
 </mapper>
 

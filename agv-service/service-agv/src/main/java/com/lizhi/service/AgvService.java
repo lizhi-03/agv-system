@@ -16,6 +16,13 @@ public interface AgvService {
     List<Node> startTask(AgvTaskDTO agvTaskDTO) throws NoPathFoundException, InterruptedException;
 
     /**
+     * 只预览任务路径（不落库、不改车辆状态）
+     * @param agvTaskDTO agvCode / startPoint / endPoint / currentPoint(可缺省)
+     * @return 规划出的路径节点
+     */
+    List<Node> previewTask(AgvTaskDTO agvTaskDTO) throws NoPathFoundException;
+
+    /**
      * 获取所有agv小车状态
      * @return
      */
@@ -35,10 +42,11 @@ public interface AgvService {
     void reportAgv(AgvSnapshotDTO agvSnapshotDTO);
 
     /**
-     * 动态加车
-     * @param mun
+     * 动态加车：从现有 AGVplusNNNN 最大编号 +1 连续编号，直接写入 agv_snapshot
+     * @param mun 本次新增数量 1..50
+     * @return 新建车辆编号列表
      */
-    void batchAgv(Integer mun);
+    List<String> batchAgv(Integer mun);
 
     /**
      * 遥控小车充电

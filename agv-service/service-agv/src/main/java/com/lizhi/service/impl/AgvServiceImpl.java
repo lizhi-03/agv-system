@@ -25,9 +25,12 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.stream.IntStream;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 @Service
@@ -57,6 +60,9 @@ public class AgvServiceImpl implements AgvService {
         this.agvLogMapper = agvLogMapper;
     }
 
+    /** 批量加车编号格式：AGVplus + 至少 4 位数字 */
+    private static final Pattern AGV_PLUS_PATTERN = Pattern.compile("^AGVplus(\\d+)$");
+
     /**
      * 进行agv任务
      * @param agvTaskDTO
@@ -65,90 +71,197 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public List<Node> startTask(AgvTaskDTO agvTaskDTO) throws NoPathFoundException{
-        if (agvTaskDTO == null || agvTaskDTO.getAgvCode() == null || agvTaskDTO.getAgvCode().isBlank()) {
+        if (agvTaskDTO == null) {
+            throw new IllegalArgumentException("任务参数不能为空");
+        }
+        String agvCode = agvTaskDTO.getAgvCode();
+        if (agvCode == null || agvCode.isBlank()) {
             throw new IllegalArgumentException("agvCode 不能为空");
         }
-        if (agvTaskDTO.getStartPoint() == null || agvTaskDTO.getEndPoint() == null) {
-            throw new IllegalArgumentException("起点 startPoint 与终点 endPoint 不能为空");
+        AgvTaskDTO.Point startPoint = agvTaskDTO.getStartPoint();
+        AgvTaskDTO.Point endPoint = agvTaskDTO.getEndPoint();
+        validatePoint(startPoint, "起点 startPoint");
+        validatePoint(endPoint, "终点 endPoint");
+        // 获取AGV当前状态
+        AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        if (agv == null) {
+            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
         }
-        if (agvTaskDTO.getStartPoint().getX() == null || agvTaskDTO.getStartPoint().getY() == null
-                || agvTaskDTO.getEndPoint().getX() == null || agvTaskDTO.getEndPoint().getY() == null) {
-            throw new IllegalArgumentException("起点与终点的坐标 x/y 不能为空");
+        AgvTaskDTO.Point currentPoint = agvTaskDTO.getCurrentPoint();
+        if (currentPoint == null) {
+            // 未传当前位置时按车辆库中位置计算路径
+            currentPoint = pointOf(agv.getX(), agv.getY());
+        } else {
+            validatePoint(currentPoint, "当前位置 currentPoint");
         }
+        // 先只做路径规划（只读），避免在持有车辆状态锁时执行耗时的 A*
+        List<Node> pathList = planPath(agvCode, currentPoint, startPoint, endPoint, true);
+        if (pathList.isEmpty()) {
+            throw new IllegalArgumentException("未找到有效路径");
+        }
+        String startLabel = labelOf(startPoint);
+        String endLabel = labelOf(endPoint);
         AgvTask agvTask = new AgvTask();
-        String agvCode = agvTaskDTO.getAgvCode();
-        agvTask.setTaskCode(agvTaskDTO.getTaskCode());
+        String taskCode = agvTaskDTO.getTaskCode();
+        if (taskCode == null || taskCode.isBlank()) {
+            taskCode = "T" + System.currentTimeMillis() + agvCode;
+        }
+        agvTask.setTaskCode(taskCode);
         agvTask.setAgvCode(agvCode);
         agvTask.setTaskType("物料运输");
         agvTask.setStatus("processing");
         agvTask.setPriority("low");
-        agvTask.setSource(agvTaskDTO.getStartPoint().getId());
-        agvTask.setDestination(agvTaskDTO.getEndPoint().getId());
+        agvTask.setSource(startPoint.getId());
+        agvTask.setDestination(endPoint.getId());
         agvTask.setStartTime(LocalDateTime.now());
-        agvTask.setStartPointX(agvTaskDTO.getStartPoint().getX());
-        agvTask.setStartPointY(agvTaskDTO.getStartPoint().getY());
-        agvTask.setPassMidPoint(0);
-        // 获取AGV当前状态
-        AgvSnapshot agv = agvMapper.getAgv(agvCode);
-        if (agv == null) {
-            throw new NoPathFoundException("未找到AGV小车: " + agvCode);
+        agvTask.setStartPointX(startPoint.getX());
+        agvTask.setStartPointY(startPoint.getY());
+        agvTask.setPassMidPoint(samePosition(currentPoint, startPoint) ? 0 : 1);
+        agvTask.setDescription("正在从" + startLabel + "前往" + endLabel);
+        // 任务下发与每秒一次的 stepJob 使用同一把车辆状态锁，防止模拟器用旧快照回写、
+        // 把刚下发的任务覆盖成 idle（batch 新车表现为停在 0,0 不执行任务）。
+        synchronized (agvSimulator) {
+            AgvSnapshot latest = agvMapper.getAgv(agvCode);
+            if (latest == null) {
+                throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+            }
+            agvTaskMapper.insert(agvTask);
+            latest.setPlannedPath(pathList);
+            latest.setPathIndex(0);
+            latest.setStatus("running");
+            latest.setSpeed(150);
+            latest.setTaskId(agvTask.getTaskId());
+            latest.setDescription(agvTask.getDescription());
+            agvMapper.updateAgv(latest);
+            AgvLog agvLog = new AgvLog();
+            agvLog.setTimestamp(LocalDateTime.now());
+            agvLog.setLevel("info");
+            agvLog.setMessage(agvCode + " 开始执行任务 " + agvTask.getTaskId());
+            agvLogMapper.insert(agvLog);
         }
-        agvTask.setDescription("正在从"+agvTaskDTO.getStartPoint().getId()+"前往"+agvTaskDTO.getEndPoint().getId());
-        agv.setDescription(agvTask.getDescription());
-        AgvTaskDTO.Point startPoint = agvTaskDTO.getStartPoint();
-        AgvTaskDTO.Point currentPoint = agvTaskDTO.getCurrentPoint();
-        AgvTaskDTO.Point endPoint = agvTaskDTO.getEndPoint();
-        if (currentPoint == null) {
-            // 未传当前位置时按车辆库中位置计算路径
-            currentPoint = new AgvTaskDTO.Point();
-            currentPoint.setX(agv.getX());
-            currentPoint.setY(agv.getY());
-        }
-        ArrayList<Node> pathList = new ArrayList<>();
-        Node currentNode = new Node(currentPoint.getX(), currentPoint.getY());
-        Node startNode = new Node(startPoint.getX(), startPoint.getY());
-        Node endNode = new Node(endPoint.getX(), endPoint.getY());
-        //判断当前点位是否为开始站点
-        if(currentPoint != startPoint){
-            agvTask.setPassMidPoint(1);
-            List<Node> startPath = agvUnlock.realTimePath(currentNode, startNode,null,agvCode);
-            List<Node> endPath = agvUnlock.realTimePath(startNode, endNode,null,agvCode);
-            // 合并路径
-            startPath.addAll(endPath);
-            pathList.addAll(startPath);
-        }else {
-            //从开始站点到达结束站点
-            List<Node> startPath = agvUnlock.realTimePath(startNode, endNode,null,agvCode);
-            pathList.addAll(startPath);
-        }
-        agv.setPlannedPath(pathList);
-        agv.setPathIndex(0);
-        agv.setStatus("running");
-        agv.setSpeed(150);
-        agvTaskMapper.insert(agvTask);
-        agv.setTaskId(agvTask.getTaskId());
-        agvMapper.updateAgv(agv);
-        AgvLog agvLog = new AgvLog();
-        agvLog.setTimestamp(LocalDateTime.now());
-        agvLog.setLevel("info");
-        agvLog.setMessage(agvCode+" 开始执行任务 " + agv.getTaskId());
-        agvLogMapper.insert(agvLog);
         return pathList;
     }
 
     /**
-     * 获取所有小车状态
+     * 只预览任务路径：不写任务、不改车辆状态、不写占用路径，供前端地图选点向导使用。
+     */
+    @Override
+    public List<Node> previewTask(AgvTaskDTO agvTaskDTO) throws NoPathFoundException {
+        if (agvTaskDTO == null) {
+            throw new IllegalArgumentException("预览参数不能为空");
+        }
+        String agvCode = agvTaskDTO.getAgvCode();
+        if (agvCode == null || agvCode.isBlank()) {
+            throw new IllegalArgumentException("agvCode 不能为空");
+        }
+        AgvTaskDTO.Point startPoint = agvTaskDTO.getStartPoint();
+        AgvTaskDTO.Point endPoint = agvTaskDTO.getEndPoint();
+        validatePoint(startPoint, "起点 startPoint");
+        validatePoint(endPoint, "终点 endPoint");
+        AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        if (agv == null) {
+            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+        }
+        AgvTaskDTO.Point currentPoint = agvTaskDTO.getCurrentPoint();
+        if (currentPoint == null) {
+            currentPoint = pointOf(agv.getX(), agv.getY());
+        } else {
+            validatePoint(currentPoint, "当前位置 currentPoint");
+        }
+        AgvMap currentMap = agvMapMapper.getCurrentMap();
+        if (currentMap == null) {
+            throw new IllegalStateException("当前没有可用地图，无法预览路径");
+        }
+        validateInMap(currentMap, currentPoint, "当前位置 currentPoint");
+        validateInMap(currentMap, startPoint, "起点 startPoint");
+        validateInMap(currentMap, endPoint, "终点 endPoint");
+        return planPath(agvCode, currentPoint, startPoint, endPoint, false);
+    }
+
+    /**
+     * 规划“当前位置 → 起点 → 终点”的路径。current 与 start 重合时只规划起点到终点。
+     *
+     * @param logOnError 规划失败时是否写 agv_log；/agv/preview 传 false 保证零写入
+     */
+    private List<Node> planPath(String agvCode, AgvTaskDTO.Point currentPoint, AgvTaskDTO.Point startPoint,
+                                AgvTaskDTO.Point endPoint, boolean logOnError) throws NoPathFoundException {
+        Node currentNode = new Node(currentPoint.getX(), currentPoint.getY());
+        Node startNode = new Node(startPoint.getX(), startPoint.getY());
+        Node endNode = new Node(endPoint.getX(), endPoint.getY());
+        ArrayList<Node> pathList = new ArrayList<>();
+        if (currentNode.equals(startNode)) {
+            // 车辆已在开始站点，直接规划起点到终点
+            pathList.addAll(agvUnlock.realTimePath(startNode, endNode, null, agvCode, logOnError));
+        } else {
+            pathList.addAll(agvUnlock.realTimePath(currentNode, startNode, null, agvCode, logOnError));
+            pathList.addAll(agvUnlock.realTimePath(startNode, endNode, null, agvCode, logOnError));
+        }
+        return pathList;
+    }
+
+    /** 校验点位必填坐标 */
+    private static void validatePoint(AgvTaskDTO.Point point, String name) {
+        if (point == null) {
+            throw new IllegalArgumentException(name + " 不能为空");
+        }
+        if (point.getX() == null || point.getY() == null) {
+            throw new IllegalArgumentException(name + " 的坐标 x/y 不能为空");
+        }
+    }
+
+    /** 校验点位在地图范围内 */
+    private static void validateInMap(AgvMap map, AgvTaskDTO.Point point, String name) {
+        Integer width = map.getWidth();
+        Integer height = map.getHeight();
+        if (width == null || height == null) {
+            return;
+        }
+        if (point.getX() < 0 || point.getX() >= width || point.getY() < 0 || point.getY() >= height) {
+            throw new IllegalArgumentException(name + " 坐标(" + point.getX() + "," + point.getY()
+                    + ")超出地图范围 " + width + "x" + height);
+        }
+    }
+
+    /** 由坐标构造点位 */
+    private static AgvTaskDTO.Point pointOf(Integer x, Integer y) {
+        AgvTaskDTO.Point point = new AgvTaskDTO.Point();
+        point.setX(x);
+        point.setY(y);
+        return point;
+    }
+
+    /** 两个点位是否为同一坐标 */
+    private static boolean samePosition(AgvTaskDTO.Point a, AgvTaskDTO.Point b) {
+        return a.getX().equals(b.getX()) && a.getY().equals(b.getY());
+    }
+
+    /** 点位展示名：优先站点 id，否则用坐标 */
+    private static String labelOf(AgvTaskDTO.Point point) {
+        if (point.getId() != null && !point.getId().isBlank()) {
+            return point.getId();
+        }
+        return "(" + point.getX() + "," + point.getY() + ")";
+    }
+
+    /**
+     * 获取所有小车状态（一次性查询 agv_path 后按 agvCode 分组回填，消除 N+1）
      * @return
      */
     @Override
     public List<AgvSnapshot> getAllAgv() throws NoPathFoundException {
         List<AgvSnapshot> agvList = agvMapper.getAllAgv();
+        List<AgvPath> allPaths = agvPathMapper.selectList(null);
+        Map<String, List<AgvPath>> pathsByAgv = new HashMap<>();
+        if (allPaths != null) {
+            for (AgvPath path : allPaths) {
+                if (path.getAgvCode() == null) {
+                    continue;
+                }
+                pathsByAgv.computeIfAbsent(path.getAgvCode(), k -> new ArrayList<>()).add(path);
+            }
+        }
         for (AgvSnapshot agv : agvList) {
-            String agvCode = agv.getAgvCode();
-            LambdaQueryWrapper<AgvPath> lambdaQueryWrapper = new LambdaQueryWrapper<>();
-            lambdaQueryWrapper.eq(AgvPath::getAgvCode,agvCode);
-            List<AgvPath> agvPaths = agvPathMapper.selectList(lambdaQueryWrapper);
-            agv.setAgvPaths(agvPaths);
+            agv.setAgvPaths(pathsByAgv.getOrDefault(agv.getAgvCode(), new ArrayList<>()));
         }
         return agvList;
     }
@@ -209,14 +322,43 @@ public class AgvServiceImpl implements AgvService {
     }
 
     /**
-     * 动态加车
-     * @param mun
+     * 动态加车（V2）：
+     * <ul>
+     *   <li>扫描现有 AGVplusNNNN 的最大编号，从 +1 开始连续编号，重复调用不会重复注册；</li>
+     *   <li>数量校验 1..50，非法抛 IllegalArgumentException → 统一返回 code=204 + msg；</li>
+     *   <li>仅写 agv_snapshot（不再注册单车定时任务），车辆由全局 stepJob 每秒推进，立即可用。</li>
+     * </ul>
+     *
+     * @param mun 本次新增车辆数量
+     * @return 新建车辆编号列表
      */
     @Override
-    public void batchAgv(Integer mun) {
-        IntStream.rangeClosed(1,mun)
-                .mapToObj(i->"AGVplus" + String.format("%04d",i))
-                .forEach(agvSimulator::createAndStart);
+    public synchronized List<String> batchAgv(Integer mun) {
+        if (mun == null || mun < 1 || mun > 50) {
+            throw new IllegalArgumentException("批量加车数量必须在 1~50 之间");
+        }
+        int maxIndex = 0;
+        for (AgvSnapshot agv : agvMapper.getAllAgv()) {
+            String agvCode = agv.getAgvCode();
+            if (agvCode == null) {
+                continue;
+            }
+            Matcher matcher = AGV_PLUS_PATTERN.matcher(agvCode);
+            if (matcher.matches()) {
+                try {
+                    maxIndex = Math.max(maxIndex, Integer.parseInt(matcher.group(1)));
+                } catch (NumberFormatException ignore) {
+                    // 编号超出 int 范围时忽略该车，按其它车辆继续编号
+                }
+            }
+        }
+        List<String> created = new ArrayList<>(mun);
+        for (int i = 1; i <= mun; i++) {
+            String agvCode = "AGVplus" + String.format("%04d", maxIndex + i);
+            agvSimulator.createAndStart(agvCode);
+            created.add(agvCode);
+        }
+        return created;
     }
 
     /**
