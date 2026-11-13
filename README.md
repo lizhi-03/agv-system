@@ -6,6 +6,17 @@
 > - Gitee：<https://gitee.com/blood-sugar/agv-map-system>
 > - GitHub：<https://github.com/lizhi-03/agv-system>
 
+> **V2 / V2.1 更新（2026-11）**：配套前端已独立交付（Vue 3 Apple 风格控制台，仓库外目录 `D:\VSCode\agv-system`），
+> 本轮后端为前端联调补齐能力并修复阻塞问题：
+> - 新增 `POST /agv/preview`（只规划不落库）、`GET /agv/live`（合并实时快照，`If-None-Match` → 304）与
+>   `GET /agv/stream`（SSE 实时推送，经网关 8080 可用）；
+> - `POST /agv/batch/{n}` 改为连续编号并直接入库（新增车辆可正常执行任务），返回 `data: string[]`；
+> - `/task/page` 支持 `status`/`agvCode`、`/log/page` 支持 `level`/`message` 服务端过滤；
+> - 修复：`/agv/report` 合并语义（不再清空任务）、`Node` Jackson 反序列化 500、`moveAgv` 空路径 NPE、
+>   无任务车启停 500（改为 code=204）、`/map/save` 入参校验、日志排序、CORS 预检、`getAllAgv` N+1；
+> - 新增 `sql/agv_system.sql`（建库+种子地图）与 `scripts/start-backend.ps1`（无 Nacos 一键启动）、
+>   `scripts/verify-api*.mjs` / `scripts/verify-realtime.mjs` / `scripts/seed-demo.mjs`。
+
 ---
 
 ## 目录
@@ -365,7 +376,10 @@ curl http://localhost:8000/agv/list -X POST
 
 | 方法 | 路径 | 说明 | 请求体 |
 | --- | --- | --- | --- |
-| POST | `/agv/batch/{mun}` | 动态批量加车 | - |
+| POST | `/agv/batch/{mun}` | 动态批量加车（连续编号，返回新编号 `string[]`；数量 1..50） | - |
+| POST | `/agv/preview` | 路径预览：只做 A* 规划不落库，返回 `Node[]` | `AgvTaskDTO` |
+| GET | `/agv/live` | 合并实时快照（车辆+占用路径+地图元信息+etag），`If-None-Match` 命中返回 304 | - |
+| GET | `/agv/stream` | SSE 实时推送（`event: state`，状态变化时推帧，15s 心跳） | - |
 | POST | `/agv/charge/{agvCode}` | 遥控车辆前往最近充电站 | - |
 | GET | `/agv/{agvCode}` | 查询指定车辆状态 | - |
 | POST | `/agv/list` | 查询全部车辆状态 | - |
@@ -401,14 +415,14 @@ curl http://localhost:8000/agv/list -X POST
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/task/page` | 任务分页查询（`page`、`pageSize`、`taskCode`） |
+| POST | `/task/page` | 任务分页查询（`page`、`pageSize`、`taskCode`、`status`、`agvCode`） |
 | GET | `/task/cancel/{taskId}` | 取消任务 |
 
 ### 日志管理 `AgvLogController`（`/log`）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/log/page` | 系统日志分页查询（`page`、`pageSize`） |
+| POST | `/log/page` | 系统日志分页查询（`page`、`pageSize`、`level`、`message` 模糊） |
 
 ### 统一响应
 
@@ -545,7 +559,7 @@ mvn test
 ## 已知限制与注意事项
 
 - **无鉴权**：接口未做登录 / 权限校验，请勿直接暴露到公网。
-- **无前端页面**：本项目仅提供后端 REST API，前端需自行对接。
+- **前端独立交付**：配套前端（Apple 风格控制台）已作为独立工程交付在 `D:\VSCode\agv-system`（Vue 3 + TS + Vite），通过网关 `http://localhost:8080/api` 对接；本文档只覆盖后端。前端启动与操作说明见该目录 `README.md`。
 - **明文数据库凭据**：`application.yml` 中默认 `root/root`，生产环境请改用环境变量或 Nacos 配置。
 - **端口冲突**：Sentinel Dashboard 默认配置为 `localhost:8080`，与网关端口相同，如需使用 Sentinel 请修改其中一个端口。
 - **Seata 已关闭**：`seata.enabled=false`，跨服务事务未启用。
