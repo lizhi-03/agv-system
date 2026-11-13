@@ -65,6 +65,16 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public List<Node> startTask(AgvTaskDTO agvTaskDTO) throws NoPathFoundException{
+        if (agvTaskDTO == null || agvTaskDTO.getAgvCode() == null || agvTaskDTO.getAgvCode().isBlank()) {
+            throw new IllegalArgumentException("agvCode 不能为空");
+        }
+        if (agvTaskDTO.getStartPoint() == null || agvTaskDTO.getEndPoint() == null) {
+            throw new IllegalArgumentException("起点 startPoint 与终点 endPoint 不能为空");
+        }
+        if (agvTaskDTO.getStartPoint().getX() == null || agvTaskDTO.getStartPoint().getY() == null
+                || agvTaskDTO.getEndPoint().getX() == null || agvTaskDTO.getEndPoint().getY() == null) {
+            throw new IllegalArgumentException("起点与终点的坐标 x/y 不能为空");
+        }
         AgvTask agvTask = new AgvTask();
         String agvCode = agvTaskDTO.getAgvCode();
         agvTask.setTaskCode(agvTaskDTO.getTaskCode());
@@ -88,6 +98,12 @@ public class AgvServiceImpl implements AgvService {
         AgvTaskDTO.Point startPoint = agvTaskDTO.getStartPoint();
         AgvTaskDTO.Point currentPoint = agvTaskDTO.getCurrentPoint();
         AgvTaskDTO.Point endPoint = agvTaskDTO.getEndPoint();
+        if (currentPoint == null) {
+            // 未传当前位置时按车辆库中位置计算路径
+            currentPoint = new AgvTaskDTO.Point();
+            currentPoint.setX(agv.getX());
+            currentPoint.setY(agv.getY());
+        }
         ArrayList<Node> pathList = new ArrayList<>();
         Node currentNode = new Node(currentPoint.getX(), currentPoint.getY());
         Node startNode = new Node(startPoint.getX(), startPoint.getY());
@@ -145,6 +161,10 @@ public class AgvServiceImpl implements AgvService {
     @Override
     public AgvSnapshot getAgv(String agvCode) {
         AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        // 车辆不存在时返回 null，由 Controller 统一返回业务错误，避免空指针 500
+        if (agv == null) {
+            return null;
+        }
         LambdaQueryWrapper<AgvPath> lambdaQueryWrapper = new LambdaQueryWrapper<>();
         lambdaQueryWrapper.eq(AgvPath::getAgvCode,agvCode);
         List<AgvPath> agvPaths = agvPathMapper.selectList(lambdaQueryWrapper);
@@ -158,8 +178,34 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public void reportAgv(AgvSnapshotDTO agvSnapshotDTO) {
+        String agvCode = requireAgvCode(agvSnapshotDTO);
         agvSnapshotDTO.setLastUpdate(Instant.now().toString());
+        // 合并语义：只覆盖请求里显式提供的字段。
+        // 否则 /agv/report 只上报 x/y 时会把 task_id、planned_path 置空，导致运行中的车辆任务丢失并卡死。
+        AgvSnapshot current = agvMapper.getAgv(agvCode);
+        if (current != null) {
+            if (agvSnapshotDTO.getX() == null) agvSnapshotDTO.setX(current.getX());
+            if (agvSnapshotDTO.getY() == null) agvSnapshotDTO.setY(current.getY());
+            if (agvSnapshotDTO.getDirection() == null) agvSnapshotDTO.setDirection(current.getDirection());
+            if (agvSnapshotDTO.getStatus() == null) agvSnapshotDTO.setStatus(current.getStatus());
+            if (agvSnapshotDTO.getBattery() <= 0 && current.getBattery() > 0) {
+                agvSnapshotDTO.setBattery(current.getBattery());
+            }
+            if (agvSnapshotDTO.getSpeed() == null) agvSnapshotDTO.setSpeed(current.getSpeed());
+            if (agvSnapshotDTO.getTaskId() == null) agvSnapshotDTO.setTaskId(current.getTaskId());
+            if (agvSnapshotDTO.getPlannedPath() == null) agvSnapshotDTO.setPlannedPath(current.getPlannedPath());
+            if (agvSnapshotDTO.getDescription() == null) agvSnapshotDTO.setDescription(current.getDescription());
+            if (agvSnapshotDTO.getIsCharge() == null) agvSnapshotDTO.setIsCharge(current.getIsCharge());
+        }
         agvMapper.updateAgv(agvSnapshotDTO);
+    }
+
+    /** 校验并取出 agvCode */
+    private String requireAgvCode(AgvSnapshotDTO dto) {
+        if (dto == null || dto.getAgvCode() == null || dto.getAgvCode().isBlank()) {
+            throw new IllegalArgumentException("agvCode 不能为空");
+        }
+        return dto.getAgvCode();
     }
 
     /**
@@ -180,7 +226,13 @@ public class AgvServiceImpl implements AgvService {
     public void chargeAgv(String agvCode) throws NoPathFoundException {
         //导航到最近的充电点位
         AgvMap currentMap = agvMapMapper.getCurrentMap();
+        if (currentMap == null) {
+            throw new IllegalStateException("当前没有可用地图，无法规划充电路径");
+        }
         AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        if (agv == null) {
+            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+        }
         Integer taskId = agv.getTaskId();
         if (taskId != null){
             agvTaskService.cancelTask(agv.getTaskId());
@@ -220,6 +272,9 @@ public class AgvServiceImpl implements AgvService {
         List<Node> shortestPath = pathList.stream()
                 .min(Comparator.comparingInt(List::size))
                 .orElse(null); // 如果列表为空则返回null
+        if (shortestPath == null || shortestPath.isEmpty()) {
+            throw new IllegalStateException("当前地图没有可用充电站，或车辆无法到达充电站");
+        }
 
         agvTaskMapper.insert(agvTask);
         agv.setPlannedPath(shortestPath);
@@ -243,10 +298,18 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public void stopAgv(AgvSnapshotDTO agvSnapshotDTO) {
-        AgvSnapshot agvSnapshot = new AgvSnapshot();
-        BeanUtils.copyProperties(agvSnapshotDTO,agvSnapshot);
-        AgvSnapshot agv = agvMapper.getAgv(agvSnapshot.getAgvCode());
+        String agvCode = requireAgvCode(agvSnapshotDTO);
+        AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        if (agv == null) {
+            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+        }
+        if (agv.getTaskId() == null) {
+            throw new IllegalStateException("该车辆当前没有任务，无法暂停");
+        }
         AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
+        if (agvTask == null) {
+            throw new IllegalStateException("该车辆关联的任务不存在，无法暂停");
+        }
         agvTask.setStatus("paused");
         agv.setStatus("stopping");
         agvTaskMapper.updateTask(agvTask);
@@ -259,10 +322,18 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public void startAgv(AgvSnapshotDTO agvSnapshotDTO) {
-        AgvSnapshot agvSnapshot = new AgvSnapshot();
-        BeanUtils.copyProperties(agvSnapshotDTO,agvSnapshot);
-        AgvSnapshot agv = agvMapper.getAgv(agvSnapshot.getAgvCode());
+        String agvCode = requireAgvCode(agvSnapshotDTO);
+        AgvSnapshot agv = agvMapper.getAgv(agvCode);
+        if (agv == null) {
+            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+        }
+        if (agv.getTaskId() == null) {
+            throw new IllegalStateException("该车辆当前没有任务，无法启动");
+        }
         AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
+        if (agvTask == null) {
+            throw new IllegalStateException("该车辆关联的任务不存在，无法启动");
+        }
         agv.setStatus("running");
         agvTask.setStatus("processing");
         agv.setSpeed(150);
@@ -276,8 +347,14 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public void setSpeed(AgvSnapshotDTO agvSnapshotDTO) {
-        String agvCode = agvSnapshotDTO.getAgvCode();
+        String agvCode = requireAgvCode(agvSnapshotDTO);
         Integer speed = agvSnapshotDTO.getSpeed();
+        if (speed == null) {
+            throw new IllegalArgumentException("speed 不能为空");
+        }
+        if (speed < 0 || speed > 1000) {
+            throw new IllegalArgumentException("speed 取值范围为 0~1000 cm/s");
+        }
         AgvSnapshot agvSnapshot = new AgvSnapshot();
         agvSnapshot.setAgvCode(agvCode);
         agvSnapshot.setSpeed(speed);
@@ -291,10 +368,15 @@ public class AgvServiceImpl implements AgvService {
     public void clearAllTask() {
         List<AgvSnapshot> allAgv = agvMapper.getAllAgv();
         for (AgvSnapshot agvSnapshot : allAgv) {
-            AgvTask agvTask = agvTaskMapper.getById(agvSnapshot.getTaskId());
             agvSnapshot.setStatus("idle");
-            agvTask.setStatus("cancelled");
-            agvTaskMapper.updateTask(agvTask);
+            // 空闲车辆没有任务，跳过任务状态更新，避免空指针
+            if (agvSnapshot.getTaskId() != null) {
+                AgvTask agvTask = agvTaskMapper.getById(agvSnapshot.getTaskId());
+                if (agvTask != null) {
+                    agvTask.setStatus("cancelled");
+                    agvTaskMapper.updateTask(agvTask);
+                }
+            }
             agvMapper.updateAgv(agvSnapshot);
         }
     }

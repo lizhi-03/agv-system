@@ -1,11 +1,16 @@
 package com.lizhi.domain.po;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.io.Serializable;
 import java.util.Objects;
 
 /**
  * 寻路节点类，封装坐标x和y, 移动代价cost和父节点索引
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Node implements Serializable {
     private final int x;        // x坐标
     private final int y;        // y坐标
@@ -22,7 +27,13 @@ public class Node implements Serializable {
         this.cost = cost;
     }
 
-    public Node(int x, int y) {
+    /**
+     * 反序列化构造器：用于 /agv/report 等接口回传 plannedPath 时由 Jackson 还原节点。
+     * 注意：x、y 为 final，必须通过 @JsonCreator 构造，否则 Jackson 报
+     * "Cannot construct instance of Node (no Creators ...)"。
+     */
+    @JsonCreator
+    public Node(@JsonProperty("x") int x, @JsonProperty("y") int y) {
         this.x = x;
         this.y = y;
     }

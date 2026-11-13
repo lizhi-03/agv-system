@@ -32,15 +32,28 @@ public class AgvMapServiceImpl implements AgvMapService {
     @Override
     public Result<AgvMap> saveMap(AgvMapDTO agvMapDTO) {
         AgvMap oldMap = agvMapMapper.getCurrentMap();
+        if (oldMap == null) {
+            return Result.error("当前没有可用地图，无法保存新版本");
+        }
+        if (agvMapDTO == null) {
+            return Result.error("地图内容不能为空");
+        }
         oldMap.setIsCurrent(0);
         oldMap.setMapName("旧地图");
         agvMapMapper.updateMap(oldMap);
         AgvMap newMap = new AgvMap();
         BeanUtils.copyProperties(agvMapDTO,newMap);
+        // 入参缺省时继承旧地图，避免写入 NULL 后 version+1 触发空指针
+        if (newMap.getWidth() == null) newMap.setWidth(oldMap.getWidth());
+        if (newMap.getHeight() == null) newMap.setHeight(oldMap.getHeight());
+        if (newMap.getCellSize() == null) newMap.setCellSize(oldMap.getCellSize());
+        if (newMap.getObstacles() == null) newMap.setObstacles(oldMap.getObstacles());
+        if (newMap.getStations() == null) newMap.setStations(oldMap.getStations());
+        newMap.setMapId(null);
         newMap.setMapCode("map_" + System.currentTimeMillis());
         newMap.setMapName("新地图");
         newMap.setParentId(oldMap.getMapId());
-        newMap.setVersion(oldMap.getVersion()+1);
+        newMap.setVersion((oldMap.getVersion() == null ? 0 : oldMap.getVersion()) + 1);
         newMap.setIsCurrent(1);
         agvMapMapper.saveAgv(newMap);
         return Result.success();

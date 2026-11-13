@@ -5,7 +5,7 @@
 <mapper namespace="com.lizhi.mapper.AgvLogMapper">
 
     <select id="pageQuery" resultType="com.lizhi.domain.po.AgvLog">
-        select * from agv_log order by timestamp desc
+        select * from agv_log order by timestamp desc, log_id desc
     </select>
 </mapper>
 

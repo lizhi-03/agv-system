@@ -42,10 +42,15 @@ public class AgvTaskServiceImpl implements AgvTaskService {
     @Override
     public void cancelTask(Integer taskId) {
         AgvTask agvTask = agvTaskMapper.getById(taskId);
+        if (agvTask == null) {
+            throw new IllegalArgumentException("任务不存在: " + taskId);
+        }
         AgvSnapshot agv = agvMapper.getAgv(agvTask.getAgvCode());
         agvTask.setStatus("cancelled");
-        agv.setStatus("idle");
-        agvMapper.updateAgv(agv);
+        if (agv != null) {
+            agv.setStatus("idle");
+            agvMapper.updateAgv(agv);
+        }
         agvTaskMapper.updateTask(agvTask);
     }
 }

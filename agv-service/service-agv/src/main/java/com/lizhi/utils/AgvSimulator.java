@@ -183,8 +183,29 @@ public class AgvSimulator {
     public void moveAgv(AgvSnapshot car,AgvTask agvTask) throws NoPathFoundException {
         String agvCode = car.getAgvCode();
         Node currentNode = new Node(car.getX(), car.getY());
-        Node startNode = new Node(agvTask.getStartPointX(), agvTask.getStartPointY());
+        // 起始点缺失时退化为车辆当前位置，避免空指针
+        Integer startX = agvTask.getStartPointX();
+        Integer startY = agvTask.getStartPointY();
+        Node startNode = new Node(startX != null ? startX : car.getX(), startY != null ? startY : car.getY());
         List<Node> oldPath = car.getPlannedPath();
+        if (oldPath == null || oldPath.isEmpty()) {
+            // 路径丢失（例如历史上 /agv/report 未回传 plannedPath），终止任务并复位车辆，
+            // 否则这里会抛 NPE 中断每秒一次的整轮调度。
+            agvTask.setStatus("failed");
+            agvTask.setActualEndTime(LocalDateTime.now());
+            agvTask.setDescription(agvCode + " 规划路径丢失，任务终止");
+            car.setStatus("idle");
+            car.setSpeed(0);
+            car.setTaskId(null);
+            car.setPlannedPath(null);
+            car.setPathIndex(0);
+            car.setIsCharge(0);
+            agvPathMapper.deleteByAgvCode(agvCode);
+            if (agvTask.getTaskId() != null) {
+                agvTaskMapper.updateTask(agvTask);
+            }
+            return;
+        }
         Node endNode = oldPath.get(oldPath.size()-1);
         LambdaQueryWrapper<AgvPath> lambdaQueryWrapper = new LambdaQueryWrapper<>();
         lambdaQueryWrapper.ne(AgvPath::getAgvCode,car.getAgvCode());
