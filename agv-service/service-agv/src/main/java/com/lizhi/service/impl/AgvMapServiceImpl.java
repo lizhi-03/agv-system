@@ -1,33 +1,29 @@
 package com.lizhi.service.impl;
 
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.lizhi.domain.dto.AgvMapDTO;
 import com.lizhi.domain.po.AgvMap;
-import com.lizhi.domain.po.AgvPath;
 import com.lizhi.mapper.AgvMapMapper;
-import com.lizhi.mapper.AgvPathMapper;
+import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.result.Result;
 import com.lizhi.service.AgvMapService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
-
 @Service
 public class AgvMapServiceImpl implements AgvMapService {
 
     private final AgvMapMapper agvMapMapper;
-    private final AgvPathMapper agvPathMapper;
+    private final LiveStateCache liveStateCache;
 
-    public AgvMapServiceImpl(AgvMapMapper agvMapMapper, AgvPathMapper agvPathMapper) {
+    public AgvMapServiceImpl(AgvMapMapper agvMapMapper, LiveStateCache liveStateCache) {
         this.agvMapMapper = agvMapMapper;
-        this.agvPathMapper = agvPathMapper;
+        this.liveStateCache = liveStateCache;
     }
 
     /**
-     * 保存地图
-     * @param agvMapDTO
+     * 保存地图（生成新版本）。
+     * 写库后立即刷新实时快照，保证写后读 /agv/live 能立刻看到新 mapVersion（R-V2-08）。
      */
     @Override
     public Result<AgvMap> saveMap(AgvMapDTO agvMapDTO) {
@@ -42,7 +38,7 @@ public class AgvMapServiceImpl implements AgvMapService {
         oldMap.setMapName("旧地图");
         agvMapMapper.updateMap(oldMap);
         AgvMap newMap = new AgvMap();
-        BeanUtils.copyProperties(agvMapDTO,newMap);
+        BeanUtils.copyProperties(agvMapDTO, newMap);
         // 入参缺省时继承旧地图，避免写入 NULL 后 version+1 触发空指针
         if (newMap.getWidth() == null) newMap.setWidth(oldMap.getWidth());
         if (newMap.getHeight() == null) newMap.setHeight(oldMap.getHeight());
@@ -56,45 +52,31 @@ public class AgvMapServiceImpl implements AgvMapService {
         newMap.setVersion((oldMap.getVersion() == null ? 0 : oldMap.getVersion()) + 1);
         newMap.setIsCurrent(1);
         agvMapMapper.saveAgv(newMap);
+        liveStateCache.rebuild();
         return Result.success();
-
     }
+
     /**
-     * 获取当前地图信息
-     * @return
+     * 获取当前地图信息（V2.1：读内存快照，客户端请求不再打 DB；原响应结构不变）
      */
     @Override
     public AgvMap getCurrentMap() {
-        //MyAssert.isTrue(count==0,"设备编码重复");
-        AgvMap agvMap = agvMapMapper.getCurrentMap();
-        Integer mapId = agvMap.getMapId();
-        LambdaQueryWrapper<AgvPath> lambdaQueryWrapper = new LambdaQueryWrapper<>();
-        lambdaQueryWrapper.eq(AgvPath::getMapId,mapId);
-        List<AgvPath> agvPaths = agvPathMapper.selectList(lambdaQueryWrapper);
-        if (agvPaths != null){
-            agvMap.setPaths(agvPaths);
-        }
-        return agvMap;
+        return liveStateCache.getCurrentMap();
     }
 
     /**
-     * 重置地图
-     *
-     * @return
+     * 重置地图（返回当前地图，不做写操作）
      */
     @Override
     public AgvMap resetMap() {
-        AgvMap currentMap = agvMapMapper.getCurrentMap();
-        return currentMap;
+        return liveStateCache.getCurrentMap();
     }
 
     /**
      * 获取当前站点位置
-     * @return
      */
     @Override
     public AgvMap getStation() {
-        AgvMap agvMap = agvMapMapper.getStation();
-        return agvMap;
+        return agvMapMapper.getStation();
     }
 }

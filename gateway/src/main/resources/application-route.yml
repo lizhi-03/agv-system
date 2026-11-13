@@ -21,6 +21,9 @@ spring:
             exposedHeaders: '*'
             allowCredentials: false
             maxAge: 3600
+      # SSE 是长连接，网关侧不能过早超时；配合 service-agv 15s 心跳保持连接。
+      httpclient:
+        response-timeout: 1h
       routes:
         - id: agv
           uri: lb://service-agv

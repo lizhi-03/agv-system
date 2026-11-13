@@ -6,7 +6,9 @@ import com.lizhi.domain.po.AgvSnapshot;
 import com.lizhi.domain.po.AgvTask;
 import com.lizhi.domain.query.AgvTaskQuery;
 import com.lizhi.mapper.AgvMapper;
+import com.lizhi.mapper.AgvPathMapper;
 import com.lizhi.mapper.AgvTaskMapper;
+import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.result.PageResult;
 import com.lizhi.service.AgvTaskService;
 import org.springframework.stereotype.Service;
@@ -17,10 +19,15 @@ public class AgvTaskServiceImpl implements AgvTaskService {
 
     private final AgvTaskMapper agvTaskMapper;
     private final AgvMapper agvMapper;
+    private final AgvPathMapper agvPathMapper;
+    private final LiveStateCache liveStateCache;
 
-    public AgvTaskServiceImpl(AgvTaskMapper agvTaskMapper, AgvMapper agvMapper) {
+    public AgvTaskServiceImpl(AgvTaskMapper agvTaskMapper, AgvMapper agvMapper,
+                              AgvPathMapper agvPathMapper, LiveStateCache liveStateCache) {
         this.agvTaskMapper = agvTaskMapper;
         this.agvMapper = agvMapper;
+        this.agvPathMapper = agvPathMapper;
+        this.liveStateCache = liveStateCache;
     }
 
     /**
@@ -36,7 +43,8 @@ public class AgvTaskServiceImpl implements AgvTaskService {
     }
 
     /**
-     * 取消agv任务
+     * 取消agv任务：立即把车辆复位为 idle 并清空 taskId/plannedPath/占用路径，
+     * 然后刷新实时快照，保证写后立刻读 /agv/live 看到的是完整的新状态（R-V2-08）。
      * @param taskId
      */
     @Override
@@ -49,8 +57,15 @@ public class AgvTaskServiceImpl implements AgvTaskService {
         agvTask.setStatus("cancelled");
         if (agv != null) {
             agv.setStatus("idle");
+            agv.setTaskId(null);
+            agv.setPlannedPath(null);
+            agv.setPathIndex(0);
+            agv.setSpeed(0);
+            agv.setIsCharge(0);
             agvMapper.updateAgv(agv);
+            agvPathMapper.deleteByAgvCode(agv.getAgvCode());
         }
         agvTaskMapper.updateTask(agvTask);
+        liveStateCache.rebuild();
     }
 }

@@ -9,6 +9,7 @@ import com.lizhi.domain.dto.AgvTaskDTO;
 import com.lizhi.domain.po.*;
 import com.lizhi.feign.AgvFeignClient;
 import com.lizhi.mapper.*;
+import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.service.AgvService;
 import com.lizhi.service.AgvTaskService;
 import com.lizhi.utils.AgvConversion;
@@ -46,9 +47,10 @@ public class AgvServiceImpl implements AgvService {
     private final AgvUnlock agvUnlock;
     private final AgvPathMapper agvPathMapper;
     private final AgvLogMapper agvLogMapper;
+    private final LiveStateCache liveStateCache;
 
 
-    public AgvServiceImpl(AgvMapMapper agvMapMapper, AgvSimulator agvSimulator, AgvMapper agvMapper, AgvTaskMapper agvTaskMapper, DiscoveryClient discoveryClient, AgvFeignClient agvFeignClient, AgvConversion agvConversion, AgvTaskServiceImpl agvTaskServiceImpl, AgvTaskService agvTaskService, AgvUnlock agvUnlock, AgvPathMapper agvPathMapper, AgvLogMapper agvLogMapper) {
+    public AgvServiceImpl(AgvMapMapper agvMapMapper, AgvSimulator agvSimulator, AgvMapper agvMapper, AgvTaskMapper agvTaskMapper, DiscoveryClient discoveryClient, AgvFeignClient agvFeignClient, AgvConversion agvConversion, AgvTaskServiceImpl agvTaskServiceImpl, AgvTaskService agvTaskService, AgvUnlock agvUnlock, AgvPathMapper agvPathMapper, AgvLogMapper agvLogMapper, LiveStateCache liveStateCache) {
         this.agvMapMapper = agvMapMapper;
         this.agvSimulator = agvSimulator;
         this.agvMapper = agvMapper;
@@ -58,6 +60,7 @@ public class AgvServiceImpl implements AgvService {
         this.agvUnlock = agvUnlock;
         this.agvPathMapper = agvPathMapper;
         this.agvLogMapper = agvLogMapper;
+        this.liveStateCache = liveStateCache;
     }
 
     /** 批量加车编号格式：AGVplus + 至少 4 位数字 */
@@ -139,6 +142,8 @@ public class AgvServiceImpl implements AgvService {
             agvLog.setMessage(agvCode + " 开始执行任务 " + agvTask.getTaskId());
             agvLogMapper.insert(agvLog);
         }
+        // 写后立即刷新实时快照，保证 /agv/live、/agv/list 立刻能看到 taskId/status 变化
+        liveStateCache.rebuild();
         return pathList;
     }
 
@@ -244,26 +249,12 @@ public class AgvServiceImpl implements AgvService {
     }
 
     /**
-     * 获取所有小车状态（一次性查询 agv_path 后按 agvCode 分组回填，消除 N+1）
+     * 获取所有小车状态（V2.1：直接读每秒重建的内存快照，客户端请求不再打 DB）
      * @return
      */
     @Override
     public List<AgvSnapshot> getAllAgv() throws NoPathFoundException {
-        List<AgvSnapshot> agvList = agvMapper.getAllAgv();
-        List<AgvPath> allPaths = agvPathMapper.selectList(null);
-        Map<String, List<AgvPath>> pathsByAgv = new HashMap<>();
-        if (allPaths != null) {
-            for (AgvPath path : allPaths) {
-                if (path.getAgvCode() == null) {
-                    continue;
-                }
-                pathsByAgv.computeIfAbsent(path.getAgvCode(), k -> new ArrayList<>()).add(path);
-            }
-        }
-        for (AgvSnapshot agv : agvList) {
-            agv.setAgvPaths(pathsByAgv.getOrDefault(agv.getAgvCode(), new ArrayList<>()));
-        }
-        return agvList;
+        return liveStateCache.getCars();
     }
 
     /**
@@ -311,6 +302,8 @@ public class AgvServiceImpl implements AgvService {
             if (agvSnapshotDTO.getIsCharge() == null) agvSnapshotDTO.setIsCharge(current.getIsCharge());
         }
         agvMapper.updateAgv(agvSnapshotDTO);
+        // 写后立即刷新实时快照（R-V2-08）
+        liveStateCache.rebuild();
     }
 
     /** 校验并取出 agvCode */
@@ -358,6 +351,8 @@ public class AgvServiceImpl implements AgvService {
             agvSimulator.createAndStart(agvCode);
             created.add(agvCode);
         }
+        // 写后立即刷新实时快照，保证 /agv/live 立刻出现新车
+        liveStateCache.rebuild();
         return created;
     }
 
@@ -432,6 +427,7 @@ public class AgvServiceImpl implements AgvService {
         agvLogMapper.insert(agvLog);
         // 到达充电点位后
         agvMapper.updateAgv(agv);
+        liveStateCache.rebuild();
     }
 
     /**
@@ -456,6 +452,7 @@ public class AgvServiceImpl implements AgvService {
         agv.setStatus("stopping");
         agvTaskMapper.updateTask(agvTask);
         agvMapper.updateAgv(agv);
+        liveStateCache.rebuild();
     }
 
     /**
@@ -481,6 +478,7 @@ public class AgvServiceImpl implements AgvService {
         agv.setSpeed(150);
         agvTaskMapper.updateTask(agvTask);
         agvMapper.updateAgv(agv);
+        liveStateCache.rebuild();
     }
 
     /**
@@ -501,10 +499,12 @@ public class AgvServiceImpl implements AgvService {
         agvSnapshot.setAgvCode(agvCode);
         agvSnapshot.setSpeed(speed);
         agvMapper.updateSpeed(agvSnapshot);
+        liveStateCache.rebuild();
     }
 
     /**
-     * 清除所有任务
+     * 清除所有任务：车辆立即复位为 idle，并清空 taskId/plannedPath/占用路径，
+     * 保证写后立刻读 /agv/live 看到完整的新状态（R-V2-08）。
      */
     @Override
     public void clearAllTask() {
@@ -519,7 +519,14 @@ public class AgvServiceImpl implements AgvService {
                     agvTaskMapper.updateTask(agvTask);
                 }
             }
+            agvSnapshot.setTaskId(null);
+            agvSnapshot.setPlannedPath(null);
+            agvSnapshot.setPathIndex(0);
+            agvSnapshot.setSpeed(0);
+            agvSnapshot.setIsCharge(0);
             agvMapper.updateAgv(agvSnapshot);
+            agvPathMapper.deleteByAgvCode(agvSnapshot.getAgvCode());
         }
+        liveStateCache.rebuild();
     }
 }
