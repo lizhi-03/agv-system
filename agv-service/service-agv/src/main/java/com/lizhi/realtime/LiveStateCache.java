@@ -4,10 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lizhi.domain.po.AgvMap;
 import com.lizhi.domain.po.AgvPath;
 import com.lizhi.domain.po.AgvSnapshot;
-import com.lizhi.mapper.AgvMapMapper;
 import com.lizhi.mapper.AgvMapper;
 import com.lizhi.mapper.AgvPathMapper;
+import com.lizhi.utils.MapCache;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -38,7 +39,7 @@ public class LiveStateCache {
 
     private final AgvMapper agvMapper;
     private final AgvPathMapper agvPathMapper;
-    private final AgvMapMapper agvMapMapper;
+    private final MapCache mapCache;
     private final ObjectMapper objectMapper;
 
     /** 变更监听（SSE 推送用），在锁外通知，避免慢客户端阻塞 tick / 写请求 */
@@ -50,10 +51,10 @@ public class LiveStateCache {
     private volatile String mapEtag = "\"map-0-0\"";
 
     public LiveStateCache(AgvMapper agvMapper, AgvPathMapper agvPathMapper,
-                          AgvMapMapper agvMapMapper, ObjectMapper objectMapper) {
+                          MapCache mapCache, ObjectMapper objectMapper) {
         this.agvMapper = agvMapper;
         this.agvPathMapper = agvPathMapper;
-        this.agvMapMapper = agvMapMapper;
+        this.mapCache = mapCache;
         this.objectMapper = objectMapper;
     }
 
@@ -152,7 +153,14 @@ public class LiveStateCache {
             car.setAgvPaths(pathsByAgv.getOrDefault(car.getAgvCode(), new ArrayList<>()));
         }
 
-        AgvMap map = agvMapMapper.getCurrentMap();
+        // 地图取缓存（只在版本变化时才重新查库、解析障碍/站点 JSON）；
+        // 缓存对象是共享只读的，这里浅拷贝一份再回填 paths
+        MapCache.Snapshot mapSnapshot = mapCache.current();
+        AgvMap map = null;
+        if (mapSnapshot != null) {
+            map = new AgvMap();
+            BeanUtils.copyProperties(mapSnapshot.map(), map);
+        }
         if (map != null) {
             // 与旧 /map/current 行为一致：只回填当前地图的占用路径
             List<AgvPath> mapPaths = new ArrayList<>();

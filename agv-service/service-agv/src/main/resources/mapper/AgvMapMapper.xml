@@ -68,6 +68,11 @@
         select * from agv_map where is_current = 1
     </select>
 
+    <!-- 只取版本指纹，不取 obstacles/stations 大字段：用于地图缓存的失效探测 -->
+    <select id="getCurrentMapVersion" resultMap="AgvMapResultMap">
+        select map_id, version, updated_at from agv_map where is_current = 1
+    </select>
+
     <select id="getMapById" resultMap="AgvMapResultMap">
         select * from agv_map where map_id = #{mapId}
     </select>

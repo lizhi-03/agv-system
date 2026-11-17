@@ -1,6 +1,7 @@
 package com.lizhi.domain.po;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
@@ -9,6 +10,9 @@ import java.util.Objects;
 
 /**
  * 寻路节点类，封装坐标x和y, 移动代价cost和父节点索引
+ * <p>
+ * 对外 JSON 只输出 x / y：cost、g、h、parent 是 A* 的内部状态，parent 还是一条递归链
+ * （52 个节点的路径会被序列化成约 39KB），前端只使用坐标，因此统一用 @JsonIgnore 屏蔽。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Node implements Serializable {
@@ -46,6 +50,7 @@ public class Node implements Serializable {
         return y;
     }
 
+    @JsonIgnore
     public double getCost() {
         return cost;
     }
@@ -54,6 +59,7 @@ public class Node implements Serializable {
         this.cost = cost;
     }
 
+    @JsonIgnore
     public Node getParent() {
         return parent;
     }
@@ -70,6 +76,7 @@ public class Node implements Serializable {
         this.f = f;
     }*/
 
+    @JsonIgnore
     public double getG() {
         return g;
     }
@@ -78,6 +85,7 @@ public class Node implements Serializable {
         this.g = g;
     }
 
+    @JsonIgnore
     public double getH() {
         return h;
     }

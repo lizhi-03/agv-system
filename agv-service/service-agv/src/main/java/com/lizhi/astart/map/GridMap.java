@@ -45,6 +45,25 @@ public class GridMap {
 
     }
 
+    /** 复制构造：权重数组深拷贝，副本上的修改不影响原对象（供缓存的地图模板使用） */
+    private GridMap(GridMap source) {
+        this.allowDiagonal = source.allowDiagonal;
+        this.height = source.height;
+        this.width = source.width;
+        this.weight = new double[height][];
+        for (int i = 0; i < height; i++) {
+            this.weight[i] = source.weight[i].clone();
+        }
+    }
+
+    /**
+     * 返回一份独立副本。地图模板（障碍 + 站点）按 mapId/version 缓存，每次规划在副本上
+     * 叠加起点/终点等临时权重，避免每次规划都重新解析地图、初始化网格。
+     */
+    public GridMap copy() {
+        return new GridMap(this);
+    }
+
     /**
      * 设置某个格子的代价
      * @param x

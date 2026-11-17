@@ -8,5 +8,13 @@
         delete from agv_path where agv_code = #{agvCode}
     </delete>
 
+    <!-- 多值批量插入：一次规划的占用路径用 1 条 SQL 写入，替代逐点 insert -->
+    <insert id="insertBatch">
+        insert into agv_path (agv_code, x, y, type, map_id) values
+        <foreach collection="paths" item="p" separator=",">
+            (#{p.agvCode}, #{p.x}, #{p.y}, #{p.type}, #{p.mapId})
+        </foreach>
+    </insert>
+
 </mapper>
 

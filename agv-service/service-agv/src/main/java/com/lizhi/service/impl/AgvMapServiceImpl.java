@@ -7,32 +7,50 @@ import com.lizhi.mapper.AgvMapMapper;
 import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.result.Result;
 import com.lizhi.service.AgvMapService;
+import com.lizhi.utils.MapCache;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class AgvMapServiceImpl implements AgvMapService {
 
     private final AgvMapMapper agvMapMapper;
     private final LiveStateCache liveStateCache;
+    private final MapCache mapCache;
+    private final TransactionTemplate transactionTemplate;
 
-    public AgvMapServiceImpl(AgvMapMapper agvMapMapper, LiveStateCache liveStateCache) {
+    public AgvMapServiceImpl(AgvMapMapper agvMapMapper, LiveStateCache liveStateCache, MapCache mapCache,
+                             TransactionTemplate transactionTemplate) {
         this.agvMapMapper = agvMapMapper;
         this.liveStateCache = liveStateCache;
+        this.mapCache = mapCache;
+        this.transactionTemplate = transactionTemplate;
     }
 
     /**
      * 保存地图（生成新版本）。
-     * 写库后立即刷新实时快照，保证写后读 /agv/live 能立刻看到新 mapVersion（R-V2-08）。
+     * "旧版本置为历史 + 插入新版本"在同一事务内完成，不会出现没有当前地图的中间状态；
+     * 提交后让地图缓存失效并刷新实时快照，保证写后读 /agv/live 能立刻看到新 mapVersion（R-V2-08）。
      */
     @Override
     public Result<AgvMap> saveMap(AgvMapDTO agvMapDTO) {
-        AgvMap oldMap = agvMapMapper.getCurrentMap();
-        if (oldMap == null) {
-            return Result.error("当前没有可用地图，无法保存新版本");
-        }
         if (agvMapDTO == null) {
             return Result.error("地图内容不能为空");
+        }
+        Boolean saved = transactionTemplate.execute(status -> doSaveMap(agvMapDTO));
+        if (!Boolean.TRUE.equals(saved)) {
+            return Result.error("当前没有可用地图，无法保存新版本");
+        }
+        mapCache.invalidate();
+        liveStateCache.rebuild();
+        return Result.success();
+    }
+
+    private boolean doSaveMap(AgvMapDTO agvMapDTO) {
+        AgvMap oldMap = agvMapMapper.getCurrentMap();
+        if (oldMap == null) {
+            return false;
         }
         oldMap.setIsCurrent(0);
         oldMap.setMapName("旧地图");
@@ -52,8 +70,7 @@ public class AgvMapServiceImpl implements AgvMapService {
         newMap.setVersion((oldMap.getVersion() == null ? 0 : oldMap.getVersion()) + 1);
         newMap.setIsCurrent(1);
         agvMapMapper.saveAgv(newMap);
-        liveStateCache.rebuild();
-        return Result.success();
+        return true;
     }
 
     /**
