@@ -1,9 +1,9 @@
 # Start AGV backend locally without Nacos (static service discovery).
 # Prereqs: MySQL 8 running with database agv_system (see sql/agv_system.sql),
-#          JDK 17+ (this script uses D:\Program Files\Java\java21).
+#          JDK 17+ (this script defaults to D:\Program Files\Java\java21).
 #
 # Ports: gateway 8080 (front-end entry, /api/**), service-agv 18000.
-# Why 18000: something else owns 8000 on this machine, so service-agv is moved.
+# Why 18000: another app owns 8000 on this machine, so service-agv is moved.
 # The gateway forwards lb://service-agv -> http://localhost:18000 via
 # Spring Cloud SimpleDiscoveryClient (spring.cloud.discovery.client.simple.*).
 #
@@ -12,6 +12,9 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\start-backend.ps1
 # Stop with Ctrl+C in each window, or:
 #   Get-Process java | Stop-Process
+#
+# NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads a BOM-less
+# UTF-8 script as ANSI, so non-ASCII text here can break parsing.
 param(
     [string]$Java = 'D:\Program Files\Java\java21\bin\java.exe',
     [string]$MysqlPassword = $env:AGV_MYSQL_PASSWORD,
@@ -21,9 +24,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 数据库密码只从参数/环境变量读取，不写入仓库；缺失时交互式输入（不回显）
+# Read the DB password from the parameter / env var only; prompt securely if absent.
 if ([string]::IsNullOrEmpty($MysqlPassword)) {
-    $secure = Read-Host 'MySQL root 密码（输入不回显）' -AsSecureString
+    $secure = Read-Host 'MySQL root password (input hidden)' -AsSecureString
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     try {
         $MysqlPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
@@ -32,7 +35,7 @@ if ([string]::IsNullOrEmpty($MysqlPassword)) {
     }
 }
 if ([string]::IsNullOrEmpty($MysqlPassword)) {
-    throw 'MySQL 密码为空：请设置环境变量 AGV_MYSQL_PASSWORD 或使用 -MysqlPassword 参数'
+    throw 'MySQL password is empty: set AGV_MYSQL_PASSWORD or pass -MysqlPassword'
 }
 $root = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $root 'logs'
