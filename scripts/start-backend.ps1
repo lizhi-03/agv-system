@@ -7,18 +7,33 @@
 # The gateway forwards lb://service-agv -> http://localhost:18000 via
 # Spring Cloud SimpleDiscoveryClient (spring.cloud.discovery.client.simple.*).
 #
-# Usage:
+# Usage (never hardcode the DB password in this file or commit it):
+#   $env:AGV_MYSQL_PASSWORD = '<your-mysql-root-password>'   # or pass -MysqlPassword
 #   powershell -ExecutionPolicy Bypass -File scripts\start-backend.ps1
 # Stop with Ctrl+C in each window, or:
 #   Get-Process java | Stop-Process
 param(
     [string]$Java = 'D:\Program Files\Java\java21\bin\java.exe',
-    [string]$MysqlPassword = '123456',
+    [string]$MysqlPassword = $env:AGV_MYSQL_PASSWORD,
     [int]$ServicePort = 18000,
     [int]$GatewayPort = 8080
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 数据库密码只从参数/环境变量读取，不写入仓库；缺失时交互式输入（不回显）
+if ([string]::IsNullOrEmpty($MysqlPassword)) {
+    $secure = Read-Host 'MySQL root 密码（输入不回显）' -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        $MysqlPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+if ([string]::IsNullOrEmpty($MysqlPassword)) {
+    throw 'MySQL 密码为空：请设置环境变量 AGV_MYSQL_PASSWORD 或使用 -MysqlPassword 参数'
+}
 $root = Split-Path -Parent $PSScriptRoot
 $logDir = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
