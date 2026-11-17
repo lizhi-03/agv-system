@@ -16,6 +16,8 @@
 >   无任务车启停 500（改为 code=204）、`/map/save` 入参校验、日志排序、CORS 预检、`getAllAgv` N+1；
 > - 新增 `sql/agv_system.sql`（建库+种子地图）与 `scripts/start-backend.ps1`（无 Nacos 一键启动）、
 >   `scripts/verify-api*.mjs` / `scripts/verify-realtime.mjs` / `scripts/seed-demo.mjs`。
+> - `scripts/start-backend.ps1` 的数据库密码通过环境变量 `AGV_MYSQL_PASSWORD`（或 `-MysqlPassword` 参数）传入，
+>   **仓库中不含任何真实数据库凭据**；首次运行会提示输入密码。
 
 ---
 
