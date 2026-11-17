@@ -129,7 +129,7 @@ flowchart LR
 | `agv-service` | 业务服务聚合模块（`pom` 打包），聚合 `service-agv` |
 | `agv-service/service-agv` | AGV 核心服务：Controller、Service、Mapper、A* 算法、车辆仿真、定时任务、Feign 客户端 |
 | `gateway` | Spring Cloud Gateway 网关，路由 `/api/**` 到 `service-agv` |
-| `agv/`、`agv-service/agv/` | Maven 构建输出目录：可执行 jar + 公共 `lib/`（已提交到仓库） |
+| `agv/`、`agv-service/agv/` | Maven 构建输出目录：可执行 jar + 公共 `lib/`（**构建生成，不纳入版本库**） |
 | `service-agv/src/test` | 数据结构练习实现与 JUnit 5 单元测试 |
 
 ---
@@ -565,7 +565,7 @@ mvn test
 - **明文数据库凭据**：`application.yml` 中默认 `root/root`，生产环境请改用环境变量或 Nacos 配置。
 - **端口冲突**：Sentinel Dashboard 默认配置为 `localhost:8080`，与网关端口相同，如需使用 Sentinel 请修改其中一个端口。
 - **Seata 已关闭**：`seata.enabled=false`，跨服务事务未启用。
-- **构建产物入库**：`agv/` 与 `agv-service/agv/` 下的 jar 及 `lib/` 已提交版本库（体积约 100 MB / 目录），如无特殊需要建议改为构建时生成、不纳入版本控制。
+- **构建产物不入库**：`agv/` 与 `agv-service/agv/` 下的可执行 jar 及 `lib/` 已从版本库移除（`.gitignore` 排除），请执行 `mvn -DskipTests package` 在本地生成后再启动；仓库中不再包含 jar 包。
 - **仿真属性**：车辆移动、耗电、充电、定时任务均为模拟逻辑，接入真实车辆时需替换 `AgvSimulator` 与控制层。
 - **碰撞检测未启用**：`stepJob` 中的碰撞检测代码默认注释，需要时自行开启。
 - **部分工具类为占位**：`AgvTaskScheduling`、`AgvVehicleControl`、`AgvWayfinding` 目前为空实现，可作为后续扩展入口。
