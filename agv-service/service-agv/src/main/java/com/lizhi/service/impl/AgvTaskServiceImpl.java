@@ -11,6 +11,8 @@ import com.lizhi.mapper.AgvTaskMapper;
 import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.result.PageResult;
 import com.lizhi.service.AgvTaskService;
+import com.lizhi.utils.AgvLockManager;
+import com.lizhi.utils.PageBounds;
 import org.springframework.stereotype.Service;
 
 
@@ -21,9 +23,12 @@ public class AgvTaskServiceImpl implements AgvTaskService {
     private final AgvMapper agvMapper;
     private final AgvPathMapper agvPathMapper;
     private final LiveStateCache liveStateCache;
+    private final AgvLockManager agvLockManager;
 
     public AgvTaskServiceImpl(AgvTaskMapper agvTaskMapper, AgvMapper agvMapper,
-                              AgvPathMapper agvPathMapper, LiveStateCache liveStateCache) {
+                              AgvPathMapper agvPathMapper, LiveStateCache liveStateCache,
+                              AgvLockManager agvLockManager) {
+        this.agvLockManager = agvLockManager;
         this.agvTaskMapper = agvTaskMapper;
         this.agvMapper = agvMapper;
         this.agvPathMapper = agvPathMapper;
@@ -37,7 +42,8 @@ public class AgvTaskServiceImpl implements AgvTaskService {
      */
     @Override
     public PageResult pageQuery(AgvTaskQuery agvTaskQuery) {
-        PageHelper.startPage(agvTaskQuery.getPage(),agvTaskQuery.getPageSize());
+        PageBounds.requireKeywordLength(agvTaskQuery.getTaskCode(), "taskCode");
+        PageHelper.startPage(PageBounds.page(agvTaskQuery.getPage()), PageBounds.pageSize(agvTaskQuery.getPageSize()));
         Page<AgvTask> page = agvTaskMapper.pageQuery(agvTaskQuery);
         return new PageResult(page.getTotal(),page.getResult());
     }
@@ -49,23 +55,30 @@ public class AgvTaskServiceImpl implements AgvTaskService {
      */
     @Override
     public void cancelTask(Integer taskId) {
-        AgvTask agvTask = agvTaskMapper.getById(taskId);
-        if (agvTask == null) {
+        AgvTask found = agvTaskMapper.getById(taskId);
+        if (found == null) {
             throw new IllegalArgumentException("任务不存在: " + taskId);
         }
-        AgvSnapshot agv = agvMapper.getAgv(agvTask.getAgvCode());
-        agvTask.setStatus("cancelled");
-        if (agv != null) {
-            agv.setStatus("idle");
-            agv.setTaskId(null);
-            agv.setPlannedPath(null);
-            agv.setPathIndex(0);
-            agv.setSpeed(0);
-            agv.setIsCharge(0);
-            agvMapper.updateAgv(agv);
-            agvPathMapper.deleteByAgvCode(agv.getAgvCode());
-        }
-        agvTaskMapper.updateTask(agvTask);
+        // 与 tick 共用车锁，任务与车辆在同一事务内更新
+        agvLockManager.runInLockedTx(found.getAgvCode(), () -> {
+            AgvTask agvTask = agvTaskMapper.getById(taskId);
+            if (agvTask == null) {
+                throw new IllegalArgumentException("任务不存在: " + taskId);
+            }
+            AgvSnapshot agv = agvMapper.getAgv(agvTask.getAgvCode());
+            agvTask.setStatus("cancelled");
+            if (agv != null) {
+                agv.setStatus("idle");
+                agv.setTaskId(null);
+                agv.setPlannedPath(null);
+                agv.setPathIndex(0);
+                agv.setSpeed(0);
+                agv.setIsCharge(0);
+                agvMapper.updateAgv(agv);
+                agvPathMapper.deleteByAgvCode(agv.getAgvCode());
+            }
+            agvTaskMapper.updateTask(agvTask);
+        });
         liveStateCache.rebuild();
     }
 }

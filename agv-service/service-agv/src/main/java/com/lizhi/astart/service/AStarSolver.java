@@ -14,6 +14,10 @@ import java.util.*;
  */
 public class AStarSolver {
 
+    /** 启发函数无状态，复用单例，避免每次代价计算都 new 两个对象 */
+    private static final Manhattan MANHATTAN = new Manhattan();
+    private static final Euclidean EUCLIDEAN = new Euclidean();
+
     private final GridMap map;
 
     public AStarSolver(GridMap map) {
@@ -61,8 +65,8 @@ public class AStarSolver {
     }
 
     private double calculationCost(Node current,Node next,Node goal){
-        Manhattan manhattan = new Manhattan();
-        Euclidean euclidean = new Euclidean();
+        Manhattan manhattan = MANHATTAN;
+        Euclidean euclidean = EUCLIDEAN;
         int dx = Math.abs(next.getX() - current.getX());
         int dy = Math.abs(next.getY() - current.getY());
         if (dx == dy && dx != 0){

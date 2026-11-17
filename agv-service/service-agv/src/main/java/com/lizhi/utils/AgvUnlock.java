@@ -3,9 +3,10 @@ package com.lizhi.utils;
 import com.lizhi.astart.map.GridMap;
 import com.lizhi.astart.service.AStarSolver;
 import com.lizhi.astart.service.NoPathFoundException;
-import com.lizhi.domain.po.*;
+import com.lizhi.domain.po.AgvLog;
+import com.lizhi.domain.po.AgvPath;
+import com.lizhi.domain.po.Node;
 import com.lizhi.mapper.AgvLogMapper;
-import com.lizhi.mapper.AgvMapMapper;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -14,13 +15,11 @@ import java.util.List;
 @Component
 public class AgvUnlock {
 
-    private final AgvMapMapper agvMapMapper;
-    private final AgvConversion agvConversion;
+    private final MapCache mapCache;
     private final AgvLogMapper agvLogMapper;
 
-    public AgvUnlock(AgvMapMapper agvMapMapper, AgvConversion agvConversion, AgvLogMapper agvLogMapper) {
-        this.agvMapMapper = agvMapMapper;
-        this.agvConversion = agvConversion;
+    public AgvUnlock(MapCache mapCache, AgvLogMapper agvLogMapper) {
+        this.mapCache = mapCache;
         this.agvLogMapper = agvLogMapper;
     }
 
@@ -39,34 +38,34 @@ public class AgvUnlock {
      */
     public List<Node> realTimePath(Node startNode, Node endNode, List<AgvPath> agvPaths, String agvCode,
                                    boolean logOnError) throws NoPathFoundException {
-        AgvMap currentMap = agvMapMapper.getCurrentMap();
-        if (currentMap == null) {
+        return realTimePath(mapCache.current(), startNode, endNode, agvPaths, agvCode, logOnError);
+    }
+
+    /**
+     * 实时路径规划（使用调用方已取得的地图快照，tick 内整轮复用同一份）。
+     * <p>
+     * 网格从缓存模板复制（障碍、站点不可通行），不再每次规划都查库、解析地图 JSON、初始化网格。
+     */
+    public List<Node> realTimePath(MapCache.Snapshot map, Node startNode, Node endNode, List<AgvPath> agvPaths,
+                                   String agvCode, boolean logOnError) throws NoPathFoundException {
+        if (map == null || map.gridTemplate() == null) {
             throw new NoPathFoundException("当前没有可用地图，无法规划路径");
         }
-        List<AgvMap.Obstacle> oldObstacles = currentMap.getObstacles();
-        List<AgvMap.Obstacle> obstacles = agvConversion.convertObstaclesToAgvObstacleObjects(oldObstacles);
-        GridMap gridMap = new GridMap(false, currentMap.getHeight(), currentMap.getWidth());
-        for (AgvMap.Obstacle obstacle : obstacles) {
-            gridMap.setWeight(obstacle.getX(), obstacle.getY(), -1);
-        }
-        List<AgvMap.Station> oldOstations = currentMap.getStations();
-        List<AgvMap.Station> stations = agvConversion.convertStationsToAgvStationObjects(oldOstations);
-        for (AgvMap.Station station : stations) {
-            gridMap.setWeight(station.getX(), station.getY(), -1);
-        }
+        GridMap gridMap = map.gridTemplate().copy();
         gridMap.setWeight(startNode.getX(), startNode.getY(), 1);
         gridMap.setWeight(endNode.getX(), endNode.getY(), 1);
+        // 注意：与改造前的行为保持一致 —— 旧代码先把其它车辆的占用路径格置为 -1，
+        // 但在求解前又全部改回 1，净效果是"占用格可通行"（即使它原本是站点/障碍）。
+        // 也就是说其它车辆的占用路径目前并不会让本车绕行。这里只保留同样的净效果，
+        // 不擅自改变避让行为；若要真正避让，应把这里改成 -1 并评估对向会车死锁的处理。
         if (agvPaths != null) {
             for (AgvPath agvPath : agvPaths) {
-                gridMap.setWeight(agvPath.getX(), agvPath.getY(), -1);
+                if (agvPath.getX() != null && agvPath.getY() != null) {
+                    gridMap.setWeight(agvPath.getX(), agvPath.getY(), 1);
+                }
             }
         }
         AStarSolver aStarSolver = new AStarSolver(gridMap);
-        if (agvPaths != null) {
-            for (AgvPath agvPath : agvPaths) {
-                gridMap.setWeight(agvPath.getX(), agvPath.getY(), 1);
-            }
-        }
         try {
             return aStarSolver.AstarFindPath(startNode, endNode);
         } catch (NoPathFoundException e) {

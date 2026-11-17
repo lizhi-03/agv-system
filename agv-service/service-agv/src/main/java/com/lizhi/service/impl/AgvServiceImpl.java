@@ -1,35 +1,25 @@
 package com.lizhi.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.lizhi.astart.map.GridMap;
-import com.lizhi.astart.service.AStarSolver;
 import com.lizhi.astart.service.NoPathFoundException;
 import com.lizhi.domain.dto.AgvSnapshotDTO;
 import com.lizhi.domain.dto.AgvTaskDTO;
 import com.lizhi.domain.po.*;
-import com.lizhi.feign.AgvFeignClient;
 import com.lizhi.mapper.*;
 import com.lizhi.realtime.LiveStateCache;
 import com.lizhi.service.AgvService;
-import com.lizhi.service.AgvTaskService;
-import com.lizhi.utils.AgvConversion;
+import com.lizhi.utils.AgvLockManager;
 import com.lizhi.utils.AgvSimulator;
 import com.lizhi.utils.AgvUnlock;
+import com.lizhi.utils.MapCache;
+import com.lizhi.utils.PageBounds;
 import lombok.extern.slf4j.Slf4j;
-import net.sf.jsqlparser.expression.DateTimeLiteralExpression;
-import org.springframework.beans.BeanUtils;
-import org.springframework.cloud.client.ServiceInstance;
-import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,29 +28,28 @@ import java.util.regex.Pattern;
 @Slf4j
 public class AgvServiceImpl implements AgvService {
 
-    private final AgvMapMapper agvMapMapper;
     private final AgvSimulator agvSimulator;
     private final AgvMapper agvMapper;
     private final AgvTaskMapper agvTaskMapper;
-    private final AgvConversion agvConversion;
-    private final AgvTaskService agvTaskService;
     private final AgvUnlock agvUnlock;
     private final AgvPathMapper agvPathMapper;
     private final AgvLogMapper agvLogMapper;
     private final LiveStateCache liveStateCache;
+    private final AgvLockManager agvLockManager;
+    private final MapCache mapCache;
 
-
-    public AgvServiceImpl(AgvMapMapper agvMapMapper, AgvSimulator agvSimulator, AgvMapper agvMapper, AgvTaskMapper agvTaskMapper, DiscoveryClient discoveryClient, AgvFeignClient agvFeignClient, AgvConversion agvConversion, AgvTaskServiceImpl agvTaskServiceImpl, AgvTaskService agvTaskService, AgvUnlock agvUnlock, AgvPathMapper agvPathMapper, AgvLogMapper agvLogMapper, LiveStateCache liveStateCache) {
-        this.agvMapMapper = agvMapMapper;
+    public AgvServiceImpl(AgvSimulator agvSimulator, AgvMapper agvMapper, AgvTaskMapper agvTaskMapper,
+                          AgvUnlock agvUnlock, AgvPathMapper agvPathMapper, AgvLogMapper agvLogMapper,
+                          LiveStateCache liveStateCache, AgvLockManager agvLockManager, MapCache mapCache) {
         this.agvSimulator = agvSimulator;
         this.agvMapper = agvMapper;
         this.agvTaskMapper = agvTaskMapper;
-        this.agvConversion = agvConversion;
-        this.agvTaskService = agvTaskService;
         this.agvUnlock = agvUnlock;
         this.agvPathMapper = agvPathMapper;
         this.agvLogMapper = agvLogMapper;
         this.liveStateCache = liveStateCache;
+        this.agvLockManager = agvLockManager;
+        this.mapCache = mapCache;
     }
 
     /** 批量加车编号格式：AGVplus + 至少 4 位数字 */
@@ -85,6 +74,7 @@ public class AgvServiceImpl implements AgvService {
         AgvTaskDTO.Point endPoint = agvTaskDTO.getEndPoint();
         validatePoint(startPoint, "起点 startPoint");
         validatePoint(endPoint, "终点 endPoint");
+        PageBounds.requireKeywordLength(agvTaskDTO.getTaskCode(), "taskCode");
         // 获取AGV当前状态
         AgvSnapshot agv = agvMapper.getAgv(agvCode);
         if (agv == null) {
@@ -121,9 +111,9 @@ public class AgvServiceImpl implements AgvService {
         agvTask.setStartPointY(startPoint.getY());
         agvTask.setPassMidPoint(samePosition(currentPoint, startPoint) ? 0 : 1);
         agvTask.setDescription("正在从" + startLabel + "前往" + endLabel);
-        // 任务下发与每秒一次的 stepJob 使用同一把车辆状态锁，防止模拟器用旧快照回写、
-        // 把刚下发的任务覆盖成 idle（batch 新车表现为停在 0,0 不执行任务）。
-        synchronized (agvSimulator) {
+        // 任务下发与 tick 使用同一把车锁，防止模拟器用旧快照回写、把刚下发的任务覆盖成 idle。
+        // 任务、车辆、日志三张表在同一个事务里写：中途失败整体回滚，不留孤儿任务。
+        agvLockManager.runInLockedTx(agvCode, () -> {
             AgvSnapshot latest = agvMapper.getAgv(agvCode);
             if (latest == null) {
                 throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
@@ -141,7 +131,7 @@ public class AgvServiceImpl implements AgvService {
             agvLog.setLevel("info");
             agvLog.setMessage(agvCode + " 开始执行任务 " + agvTask.getTaskId());
             agvLogMapper.insert(agvLog);
-        }
+        });
         // 写后立即刷新实时快照，保证 /agv/live、/agv/list 立刻能看到 taskId/status 变化
         liveStateCache.rebuild();
         return pathList;
@@ -173,10 +163,11 @@ public class AgvServiceImpl implements AgvService {
         } else {
             validatePoint(currentPoint, "当前位置 currentPoint");
         }
-        AgvMap currentMap = agvMapMapper.getCurrentMap();
-        if (currentMap == null) {
+        MapCache.Snapshot mapSnapshot = mapCache.current();
+        if (mapSnapshot == null) {
             throw new IllegalStateException("当前没有可用地图，无法预览路径");
         }
+        AgvMap currentMap = mapSnapshot.map();
         validateInMap(currentMap, currentPoint, "当前位置 currentPoint");
         validateInMap(currentMap, startPoint, "起点 startPoint");
         validateInMap(currentMap, endPoint, "终点 endPoint");
@@ -286,6 +277,16 @@ public class AgvServiceImpl implements AgvService {
         agvSnapshotDTO.setLastUpdate(Instant.now().toString());
         // 合并语义：只覆盖请求里显式提供的字段。
         // 否则 /agv/report 只上报 x/y 时会把 task_id、planned_path 置空，导致运行中的车辆任务丢失并卡死。
+        // 读-合并-写 期间持有车锁，避免与 tick 互相覆盖
+        agvLockManager.withLock(agvCode, () -> {
+            mergeAndReport(agvCode, agvSnapshotDTO);
+            return null;
+        });
+        // 写后立即刷新实时快照（R-V2-08）
+        liveStateCache.rebuild();
+    }
+
+    private void mergeAndReport(String agvCode, AgvSnapshotDTO agvSnapshotDTO) {
         AgvSnapshot current = agvMapper.getAgv(agvCode);
         if (current != null) {
             if (agvSnapshotDTO.getX() == null) agvSnapshotDTO.setX(current.getX());
@@ -302,8 +303,6 @@ public class AgvServiceImpl implements AgvService {
             if (agvSnapshotDTO.getIsCharge() == null) agvSnapshotDTO.setIsCharge(current.getIsCharge());
         }
         agvMapper.updateAgv(agvSnapshotDTO);
-        // 写后立即刷新实时快照（R-V2-08）
-        liveStateCache.rebuild();
     }
 
     /** 校验并取出 agvCode */
@@ -357,76 +356,88 @@ public class AgvServiceImpl implements AgvService {
     }
 
     /**
-     * 遥控小车充电
+     * 遥控小车充电：导航到最近的充电站。
+     * <p>
+     * 先规划（只读、不持锁），规划成功后才在"车锁 + 事务"内取消旧任务、创建充电任务并更新车辆；
+     * 规划失败不会留下"旧任务已取消但没有充电任务"的中间状态。
      * @param agvCode
      */
+    @Override
     public void chargeAgv(String agvCode) throws NoPathFoundException {
-        //导航到最近的充电点位
-        AgvMap currentMap = agvMapMapper.getCurrentMap();
-        if (currentMap == null) {
+        MapCache.Snapshot mapSnapshot = mapCache.current();
+        if (mapSnapshot == null) {
             throw new IllegalStateException("当前没有可用地图，无法规划充电路径");
         }
         AgvSnapshot agv = agvMapper.getAgv(agvCode);
         if (agv == null) {
             throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
         }
-        Integer taskId = agv.getTaskId();
-        if (taskId != null){
-            agvTaskService.cancelTask(agv.getTaskId());
-        }
         Node startNode = new Node(agv.getX(), agv.getY());
+        // 逐个充电站规划，取最短路径及其对应的站点（单个充电站不可达时继续尝试其它站）
+        List<Node> shortestPath = null;
+        String stationId = null;
+        for (AgvMap.Station station : mapSnapshot.stations()) {
+            if (!"charge".equals(station.getType()) || station.getX() == null || station.getY() == null) {
+                continue;
+            }
+            List<Node> path;
+            try {
+                path = agvUnlock.realTimePath(mapSnapshot, startNode, new Node(station.getX(), station.getY()),
+                        null, agvCode, true);
+            } catch (NoPathFoundException e) {
+                continue;
+            }
+            if (!path.isEmpty() && (shortestPath == null || path.size() < shortestPath.size())) {
+                shortestPath = path;
+                stationId = station.getId();
+            }
+        }
+        if (shortestPath == null) {
+            throw new IllegalStateException("当前地图没有可用充电站，或车辆无法到达充电站");
+        }
+
         AgvTask agvTask = new AgvTask();
-        agvTask.setTaskCode("T" + System.currentTimeMillis() + agv.getAgvCode());
+        agvTask.setTaskCode("T" + System.currentTimeMillis() + agvCode);
         agvTask.setAgvCode(agvCode);
         agvTask.setTaskType("充电");
         agvTask.setStatus("processing");
         agvTask.setPassMidPoint(0);
         agvTask.setStartPointX(agv.getX());
         agvTask.setStartPointY(agv.getY());
-        if(agv.getBattery() <= 30){
-            agvTask.setPriority("high");
-        }else {
-            agvTask.setPriority("low");
-        }
-
+        agvTask.setPriority(agv.getBattery() <= 30 ? "high" : "low");
         agvTask.setStartTime(LocalDateTime.now());
-        // 修复：处理 LinkedHashMap 转换问题
-        List<AgvMap.Station> oldStations = currentMap.getStations();
-        List<AgvMap.Station> stations = agvConversion.convertStationsToAgvStationObjects(oldStations);
-        ArrayList<List<Node>> pathList = new ArrayList<>();
-        String stationId = null;
-        for (AgvMap.Station station : stations) {
-            if ("charge".equals(station.getType())) {  // 修复：使用 equals 比较字符串
-                Node charge = new Node(station.getX(), station.getY());
-                stationId = station.getId();
-                pathList.add(agvUnlock.realTimePath(startNode,charge,null,agvCode));
-            }
-        }
         agvTask.setDestination(stationId);
         agvTask.setDescription(agvCode + "前往" + stationId + "充电");
 
-
-        List<Node> shortestPath = pathList.stream()
-                .min(Comparator.comparingInt(List::size))
-                .orElse(null); // 如果列表为空则返回null
-        if (shortestPath == null || shortestPath.isEmpty()) {
-            throw new IllegalStateException("当前地图没有可用充电站，或车辆无法到达充电站");
-        }
-
-        agvTaskMapper.insert(agvTask);
-        agv.setPlannedPath(shortestPath);
-        agv.setPathIndex(0);
-        agv.setStatus("running");
-        agv.setIsCharge(1);
-        agv.setDescription(agvTask.getDescription());
-        agv.setTaskId(agvTask.getTaskId());
-        AgvLog agvLog = new AgvLog();
-        agvLog.setTimestamp(LocalDateTime.now());
-        agvLog.setLevel("warning");
-        agvLog.setMessage(agvCode + " 电量低，自动前往充电站");
-        agvLogMapper.insert(agvLog);
-        // 到达充电点位后
-        agvMapper.updateAgv(agv);
+        List<Node> chargePath = shortestPath;
+        agvLockManager.runInLockedTx(agvCode, () -> {
+            AgvSnapshot latest = agvMapper.getAgv(agvCode);
+            if (latest == null) {
+                throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+            }
+            // 车辆正在执行其它任务：取消旧任务并清掉它的占用路径
+            if (latest.getTaskId() != null) {
+                AgvTask oldTask = agvTaskMapper.getById(latest.getTaskId());
+                if (oldTask != null) {
+                    oldTask.setStatus("cancelled");
+                    agvTaskMapper.updateTask(oldTask);
+                }
+                agvPathMapper.deleteByAgvCode(agvCode);
+            }
+            agvTaskMapper.insert(agvTask);
+            latest.setPlannedPath(chargePath);
+            latest.setPathIndex(0);
+            latest.setStatus("running");
+            latest.setIsCharge(1);
+            latest.setDescription(agvTask.getDescription());
+            latest.setTaskId(agvTask.getTaskId());
+            agvMapper.updateAgv(latest);
+            AgvLog agvLog = new AgvLog();
+            agvLog.setTimestamp(LocalDateTime.now());
+            agvLog.setLevel("warning");
+            agvLog.setMessage(agvCode + " 电量低，自动前往充电站");
+            agvLogMapper.insert(agvLog);
+        });
         liveStateCache.rebuild();
     }
 
@@ -437,21 +448,23 @@ public class AgvServiceImpl implements AgvService {
     @Override
     public void stopAgv(AgvSnapshotDTO agvSnapshotDTO) {
         String agvCode = requireAgvCode(agvSnapshotDTO);
-        AgvSnapshot agv = agvMapper.getAgv(agvCode);
-        if (agv == null) {
-            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
-        }
-        if (agv.getTaskId() == null) {
-            throw new IllegalStateException("该车辆当前没有任务，无法暂停");
-        }
-        AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
-        if (agvTask == null) {
-            throw new IllegalStateException("该车辆关联的任务不存在，无法暂停");
-        }
-        agvTask.setStatus("paused");
-        agv.setStatus("stopping");
-        agvTaskMapper.updateTask(agvTask);
-        agvMapper.updateAgv(agv);
+        agvLockManager.runInLockedTx(agvCode, () -> {
+            AgvSnapshot agv = agvMapper.getAgv(agvCode);
+            if (agv == null) {
+                throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+            }
+            if (agv.getTaskId() == null) {
+                throw new IllegalStateException("该车辆当前没有任务，无法暂停");
+            }
+            AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
+            if (agvTask == null) {
+                throw new IllegalStateException("该车辆关联的任务不存在，无法暂停");
+            }
+            agvTask.setStatus("paused");
+            agv.setStatus("stopping");
+            agvTaskMapper.updateTask(agvTask);
+            agvMapper.updateAgv(agv);
+        });
         liveStateCache.rebuild();
     }
 
@@ -462,22 +475,24 @@ public class AgvServiceImpl implements AgvService {
     @Override
     public void startAgv(AgvSnapshotDTO agvSnapshotDTO) {
         String agvCode = requireAgvCode(agvSnapshotDTO);
-        AgvSnapshot agv = agvMapper.getAgv(agvCode);
-        if (agv == null) {
-            throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
-        }
-        if (agv.getTaskId() == null) {
-            throw new IllegalStateException("该车辆当前没有任务，无法启动");
-        }
-        AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
-        if (agvTask == null) {
-            throw new IllegalStateException("该车辆关联的任务不存在，无法启动");
-        }
-        agv.setStatus("running");
-        agvTask.setStatus("processing");
-        agv.setSpeed(150);
-        agvTaskMapper.updateTask(agvTask);
-        agvMapper.updateAgv(agv);
+        agvLockManager.runInLockedTx(agvCode, () -> {
+            AgvSnapshot agv = agvMapper.getAgv(agvCode);
+            if (agv == null) {
+                throw new IllegalArgumentException("未找到AGV小车: " + agvCode);
+            }
+            if (agv.getTaskId() == null) {
+                throw new IllegalStateException("该车辆当前没有任务，无法启动");
+            }
+            AgvTask agvTask = agvTaskMapper.getById(agv.getTaskId());
+            if (agvTask == null) {
+                throw new IllegalStateException("该车辆关联的任务不存在，无法启动");
+            }
+            agv.setStatus("running");
+            agvTask.setStatus("processing");
+            agv.setSpeed(150);
+            agvTaskMapper.updateTask(agvTask);
+            agvMapper.updateAgv(agv);
+        });
         liveStateCache.rebuild();
     }
 
@@ -498,7 +513,10 @@ public class AgvServiceImpl implements AgvService {
         AgvSnapshot agvSnapshot = new AgvSnapshot();
         agvSnapshot.setAgvCode(agvCode);
         agvSnapshot.setSpeed(speed);
-        agvMapper.updateSpeed(agvSnapshot);
+        agvLockManager.withLock(agvCode, () -> {
+            agvMapper.updateSpeed(agvSnapshot);
+            return null;
+        });
         liveStateCache.rebuild();
     }
 
@@ -508,24 +526,31 @@ public class AgvServiceImpl implements AgvService {
      */
     @Override
     public void clearAllTask() {
-        List<AgvSnapshot> allAgv = agvMapper.getAllAgv();
-        for (AgvSnapshot agvSnapshot : allAgv) {
-            agvSnapshot.setStatus("idle");
-            // 空闲车辆没有任务，跳过任务状态更新，避免空指针
-            if (agvSnapshot.getTaskId() != null) {
-                AgvTask agvTask = agvTaskMapper.getById(agvSnapshot.getTaskId());
-                if (agvTask != null) {
-                    agvTask.setStatus("cancelled");
-                    agvTaskMapper.updateTask(agvTask);
+        for (AgvSnapshot listed : agvMapper.getAllAgv()) {
+            String agvCode = listed.getAgvCode();
+            // 逐车"车锁 + 事务"：单车的任务/车辆/占用路径保持一致，且不会长时间挡住 tick
+            agvLockManager.runInLockedTx(agvCode, () -> {
+                AgvSnapshot agvSnapshot = agvMapper.getAgv(agvCode);
+                if (agvSnapshot == null) {
+                    return;
                 }
-            }
-            agvSnapshot.setTaskId(null);
-            agvSnapshot.setPlannedPath(null);
-            agvSnapshot.setPathIndex(0);
-            agvSnapshot.setSpeed(0);
-            agvSnapshot.setIsCharge(0);
-            agvMapper.updateAgv(agvSnapshot);
-            agvPathMapper.deleteByAgvCode(agvSnapshot.getAgvCode());
+                agvSnapshot.setStatus("idle");
+                // 空闲车辆没有任务，跳过任务状态更新，避免空指针
+                if (agvSnapshot.getTaskId() != null) {
+                    AgvTask agvTask = agvTaskMapper.getById(agvSnapshot.getTaskId());
+                    if (agvTask != null) {
+                        agvTask.setStatus("cancelled");
+                        agvTaskMapper.updateTask(agvTask);
+                    }
+                }
+                agvSnapshot.setTaskId(null);
+                agvSnapshot.setPlannedPath(null);
+                agvSnapshot.setPathIndex(0);
+                agvSnapshot.setSpeed(0);
+                agvSnapshot.setIsCharge(0);
+                agvMapper.updateAgv(agvSnapshot);
+                agvPathMapper.deleteByAgvCode(agvCode);
+            });
         }
         liveStateCache.rebuild();
     }

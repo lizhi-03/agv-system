@@ -29,6 +29,11 @@ public interface AgvMapMapper extends BaseMapper<AgvMap> {
      * @return
      */
     AgvMap getCurrentMap();
+
+    /**
+     * 获取当前地图的版本指纹（仅 mapId / version / updatedAt，不含障碍与站点）
+     */
+    AgvMap getCurrentMapVersion();
     /**
      * 根据id获取地图
      */

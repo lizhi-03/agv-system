@@ -8,6 +8,7 @@ import com.lizhi.domain.query.AgvLogQuery;
 import com.lizhi.mapper.AgvLogMapper;
 import com.lizhi.result.PageResult;
 import com.lizhi.service.AgvLogService;
+import com.lizhi.utils.PageBounds;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -25,7 +26,7 @@ public class AgvLogServiceImpl implements AgvLogService {
      */
     @Override
     public PageResult pageQuery(AgvLogQuery agvLogQuery) {
-        PageHelper.startPage(agvLogQuery.getPage(),agvLogQuery.getPageSize());
+        PageHelper.startPage(PageBounds.page(agvLogQuery.getPage()), PageBounds.pageSize(agvLogQuery.getPageSize()));
         Page<AgvLog> page = agvLogMapper.pageQuery(agvLogQuery);
         return new PageResult(page.getTotal(),page.getResult());
     }

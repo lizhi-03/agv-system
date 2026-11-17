@@ -94,6 +94,23 @@ const plusIndex = (code) => parseInt(/^AGVplus(\d+)$/.exec(code ?? '')?.[1] ?? '
  * 服务端过滤断言：先用全量查询计算期望条数，再比对过滤查询的 total。
  * 支持最多 3 次重试，避免其它并发操作（实时 stepJob/其它测试）造成瞬时不一致。
  */
+/**
+ * 按页拉全量：服务端 pageSize 上限为 100，这里逐页取完再合并成与单次分页相同的结构。
+ */
+const PAGE_MAX = 100
+async function callAllPages(name, path, extra = {}) {
+  let merged = null
+  for (let page = 1; page <= 200; page += 1) {
+    const res = await call(name, path, { method: 'POST', body: { page, pageSize: PAGE_MAX, ...extra } })
+    if (!res) return res
+    const records = res?.data?.records ?? []
+    if (!merged) merged = { ...res, data: { ...(res.data ?? {}), records: [] } }
+    merged.data.records.push(...records)
+    if (records.length < PAGE_MAX) break
+  }
+  return merged
+}
+
 async function expectFilterTotal(label, fetchFull, fetchFiltered, predicate, alsoCheckRecords) {
   let detail = null
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -271,8 +288,8 @@ assert(
 
 // ---------------------------------------------------------------- 5. 服务端筛选
 console.log('\n[5] POST /task/page 与 /log/page 服务端过滤')
-const fetchAllTasks = () => call('任务全量', '/task/page', { method: 'POST', body: { page: 1, pageSize: 1000 } })
-const fetchTasksFiltered = (extra, name) => call(name, '/task/page', { method: 'POST', body: { page: 1, pageSize: 1000, ...extra } })
+const fetchAllTasks = () => callAllPages('任务全量', '/task/page')
+const fetchTasksFiltered = (extra, name) => callAllPages(name, '/task/page', extra)
 
 await expectFilterTotal(
   'task.status=processing',
@@ -308,17 +325,14 @@ if (taskToken) {
     (records) => records.length > 0 && records.every((t) => (t.taskCode ?? '').includes(taskToken)),
   )
 }
-const newCarProcessing = await call('任务分页-status+agvCode 组合过滤', '/task/page', {
-  method: 'POST',
-  body: { page: 1, pageSize: 1000, status: 'processing', agvCode: newCar },
-})
+const newCarProcessing = await callAllPages('任务分页-status+agvCode 组合过滤', '/task/page', { status: 'processing', agvCode: newCar })
 assert(
   (newCarProcessing?.data?.records ?? []).every((t) => t.status === 'processing' && t.agvCode === newCar),
   `status+agvCode 组合过滤结果正确（total=${newCarProcessing?.data?.total}）`,
 )
 
-const fetchAllLogs = () => call('日志全量', '/log/page', { method: 'POST', body: { page: 1, pageSize: 1000 } })
-const fetchLogsFiltered = (extra, name) => call(name, '/log/page', { method: 'POST', body: { page: 1, pageSize: 1000, ...extra } })
+const fetchAllLogs = () => callAllPages('日志全量', '/log/page')
+const fetchLogsFiltered = (extra, name) => callAllPages(name, '/log/page', extra)
 const allLogsRes = await fetchAllLogs()
 const allLogRecords = allLogsRes?.data?.records ?? []
 const levelCounts = {}
@@ -405,7 +419,7 @@ for (const code of allCreated) {
     }
   }
 }
-const afterCleanup = await call('清理后-任务分页', '/task/page', { method: 'POST', body: { page: 1, pageSize: 1000, status: 'processing', agvCode: newCar } })
+const afterCleanup = await callAllPages('清理后-任务分页', '/task/page', { status: 'processing', agvCode: newCar })
 assert((afterCleanup?.data?.records ?? []).length === 0, `本次验证任务已取消（剩余进行中 ${afterCleanup?.data?.total ?? 0}）`)
 
 // ---------------------------------------------------------------- 汇总

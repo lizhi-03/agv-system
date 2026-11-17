@@ -24,4 +24,11 @@ mybatis:
 seata:
   enabled: false
 
-
+# 仿真循环参数（以下均为默认值，可按环境覆盖）
+agv:
+  sim:
+    tick-delay-ms: 1000            # 上一轮 tick 结束到下一轮开始的间隔
+    replan-every-cells: 1          # 每走几格重规划一次；1 = 每个 tick 都重规划（旧行为）
+    dirty-check: true              # 状态无变化时不写库；false = 每个 tick 都写（旧行为）
+    auto-charge-cooldown-ms: 5000  # 同一台车两次自动充电尝试的最小间隔
+    map-cache-ttl-ms: 1000         # 地图缓存多久探测一次版本指纹
