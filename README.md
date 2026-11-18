@@ -1,84 +1,44 @@
-# AGV 智能调度与地图管理系统
+# AGV 智能调度与地图管理系统 · 后端
 
-基于 Spring Cloud 微服务架构的 AGV（Automated Guided Vehicle，自动导引车）仿真与调度平台。系统提供栅格地图管理、A* 路径规划、任务调度、车辆状态模拟、低电量自动充电、运行日志查询等能力，适合作为 AGV 调度算法的学习、演示与二次开发基础。
+基于 Spring Boot 3 / Spring Cloud 的 AGV（自动导引车）仿真与调度后端。提供栅格地图版本管理、A* 路径规划、
+任务下发与调度、车辆运动 / 耗电 / 自动充电仿真、实时状态推送（ETag 304 + SSE）和运行日志查询，
+适合用作 AGV 调度算法的学习、演示与二次开发底座。
 
-> 仓库地址：
-> - Gitee：<https://gitee.com/blood-sugar/agv-map-system>
-> - GitHub：<https://github.com/lizhi-03/agv-system>
-
-> **V2 / V2.1 更新（2026-11）**：配套前端已独立交付（Vue 3 Apple 风格控制台，仓库外目录 `D:\VSCode\agv-system`），
-> 本轮后端为前端联调补齐能力并修复阻塞问题：
-> - 新增 `POST /agv/preview`（只规划不落库）、`GET /agv/live`（合并实时快照，`If-None-Match` → 304）与
->   `GET /agv/stream`（SSE 实时推送，经网关 8080 可用）；
-> - `POST /agv/batch/{n}` 改为连续编号并直接入库（新增车辆可正常执行任务），返回 `data: string[]`；
-> - `/task/page` 支持 `status`/`agvCode`、`/log/page` 支持 `level`/`message` 服务端过滤；
-> - 修复：`/agv/report` 合并语义（不再清空任务）、`Node` Jackson 反序列化 500、`moveAgv` 空路径 NPE、
->   无任务车启停 500（改为 code=204）、`/map/save` 入参校验、日志排序、CORS 预检、`getAllAgv` N+1；
-> - 新增 `sql/agv_system.sql`（建库+种子地图）与 `scripts/start-backend.ps1`（无 Nacos 一键启动）、
->   `scripts/verify-api*.mjs` / `scripts/verify-realtime.mjs` / `scripts/seed-demo.mjs`。
-> - `scripts/start-backend.ps1` 的数据库密码通过环境变量 `AGV_MYSQL_PASSWORD`（或 `-MysqlPassword` 参数）传入，
->   **仓库中不含任何真实数据库凭据**；首次运行会提示输入密码。
-
-> **仿真循环性能优化（2026-11）**：tick 改为"每车一把锁 + 单车一个事务 + 只写变化"，地图/寻路网格缓存，
-> 占用路径批量写入，自动充电改为本地调用 + 冷却，`Node` 对外只输出 `x`/`y`，分页加边界。
-> 详见 [仿真循环与并发模型](#仿真循环与并发模型)。
+> 仓库地址：[GitHub](https://github.com/lizhi-03/agv-system) · [Gitee](https://gitee.com/blood-sugar/agv-map-system)
+>
+> 配套前端（Vue 3 + TypeScript + Vite 控制台）是独立工程，通过网关 `http://localhost:8080/api` 对接，本文只覆盖后端。
 
 ---
 
 ## 目录
 
-- [功能特性](#功能特性)
+- [功能概览](#功能概览)
 - [技术栈](#技术栈)
 - [系统架构](#系统架构)
-- [模块说明](#模块说明)
 - [目录结构](#目录结构)
 - [快速开始](#快速开始)
-- [接口一览](#接口一览)
-- [核心流程与算法](#核心流程与算法)
-- [仿真循环与并发模型](#仿真循环与并发模型)
+- [接口说明](#接口说明)
+- [实时数据通道](#实时数据通道)
+- [核心机制](#核心机制)
+- [配置项](#配置项)
+- [测试与验收](#测试与验收)
 - [构建与部署](#构建与部署)
-- [单元测试](#单元测试)
-- [配置说明](#配置说明)
-- [已知限制与注意事项](#已知限制与注意事项)
+- [已知限制](#已知限制)
+- [更新记录](#更新记录)
 
 ---
 
-## 功能特性
+## 功能概览
 
-### 地图管理
-- 保存地图并自动维护**版本链**：新地图继承上一版本 `version + 1`，旧地图置为非当前版本
-- 地图由栅格尺寸、障碍物（`obstacles`）、站点（`stations`）组成，均以 JSON 形式存储在 MySQL
-- 查询当前生效地图、站点列表（充电站等）与车辆历史路径
-
-### AGV 管理
-- 查询单辆 / 全部 AGV 的实时位置、朝向、速度、电量、状态、当前任务与规划路径
-- 动态批量加车（`AGVplus0001` 起编号）
-- 手动启动 / 停止车辆、调节速度、上报车辆位置
-- 遥控前往最近的充电站
-
-### 任务调度
-- 创建物料运输任务：自动计算「当前位置 → 起点 → 终点」路径并下发
-- 任务分页查询、取消任务、清空全部任务
-- 任务状态流转：`waiting` / `processing` / `paused` / `completed` / `failed` / `cancelled`
-
-### 路径规划
-- A* 算法实现（`GridMap` + `AStarSolver`）
-- 支持四方向 / 八方向（对角）移动，默认四方向
-- 支持曼哈顿、欧几里得、切比雪夫三种启发式函数
-- 障碍物、站点不可通行；其他车辆的占用路径会被记录和展示，但**当前不会让本车绕行**（见[已知限制](#已知限制与注意事项)）
-- 车辆移动过程中按当前位置**实时重规划**路径（默认每个 tick，可用 `agv.sim.replan-every-cells` 调整）
-
-### 车辆仿真
-- 基于 Spring `TaskScheduler` 的 1 秒步进模拟（`AgvSimulator`）
-- 按速度计算耗电；电量 ≤ 30% 自动规划前往充电站，充电时每秒恢复 5% 电量，电量 > 95% 后恢复空闲
-- 每次步进只把**发生变化**的车辆、任务、占用路径写入数据库（单车一个事务）
-- 定时任务统计在线车辆数并写入系统日志
-
-### 其他
-- 统一响应结构 `Result<T>` 与分页结构 `PageResult<T>`
-- 系统日志分级记录（`info` / `warning` / `error`）与分页查询
-- 基于分离轴定理（SAT）的矩形碰撞检测工具类 `AgvCollisionAvoidance`（默认未启用）
-- 测试代码中包含动态数组、链表、栈、队列、堆、二叉搜索树、AVL、红黑树、哈希表等数据结构练习与 JUnit 5 测试
+| 模块 | 能力 |
+| --- | --- |
+| 地图管理 | 栅格地图（宽高、障碍物、站点 / 充电站），保存即生成新版本（`version + 1`，旧版本保留为历史） |
+| 车辆管理 | 查询单车 / 全部车辆状态；批量加车（`AGVplus0001` 起连续编号）；启停、调速、上报位置；遥控前往最近充电站 |
+| 任务调度 | 下发运输任务（自动规划「当前位置 → 起点 → 终点」）；路径预览（只规划不落库）；分页查询、取消、清空 |
+| 路径规划 | A*，四方向移动（可开启八方向）；曼哈顿 / 欧几里得 / 切比雪夫启发函数；行进中按配置间隔重规划 |
+| 车辆仿真 | 每轮 tick 每车移动 1 格；按速度耗电；电量 ≤ 30% 自动去最近充电站，每 tick 充 5%，> 95% 结束 |
+| 实时推送 | `GET /agv/live` 合并快照 + ETag/304；`GET /agv/stream` SSE 推送（仅变化时推帧，15s 心跳） |
+| 日志 | `info` / `warning` / `error` 分级记录，支持级别与关键字过滤分页 |
 
 ---
 
@@ -87,19 +47,15 @@
 | 分类 | 技术 / 版本 |
 | --- | --- |
 | 语言 | Java 17 |
-| 基础框架 | Spring Boot 3.3.4 |
-| 微服务 | Spring Cloud 2023.0.3、Spring Cloud Alibaba 2023.0.3.2 |
-| 网关 | Spring Cloud Gateway |
-| 服务调用 | Spring Cloud LoadBalancer（OpenFeign 依赖保留，当前无 Feign 客户端） |
-| 注册 / 配置中心 | Nacos 2.x |
-| 流量防护 | Sentinel（可选） |
-| 分布式事务 | Seata（当前关闭） |
+| 框架 | Spring Boot 3.3.4、Spring Cloud 2023.0.3、Spring Cloud Alibaba 2023.0.3.2 |
+| 网关 | Spring Cloud Gateway + LoadBalancer |
+| 注册 / 配置中心 | Nacos 2.x（本地可用静态服务发现替代，见[快速开始](#方式二不依赖-nacos-启动推荐本地开发)） |
 | 持久层 | MyBatis 3.0.3、MyBatis-Plus 3.5.5、PageHelper 1.4.6 |
 | 数据库 | MySQL 8.x |
-| 缓存 | Spring Data Redis（已引入依赖，当前代码未使用） |
-| 工具库 | Lombok、Hutool 5.8.27、Fastjson 1.2.83 |
-| 测试 | JUnit 5（Spring Boot Starter Test） |
+| 工具库 | Lombok、Hutool 5.8.27、Fastjson 1.2.83、Jackson |
+| 测试 | JUnit 5、Mockito（Spring Boot Starter Test） |
 | 构建 | Maven 3.8+ |
+| 已引入但未启用 | Sentinel、Seata（`seata.enabled=false`）、Redis、OpenFeign |
 
 ---
 
@@ -107,35 +63,30 @@
 
 ```mermaid
 flowchart LR
-    Client[前端 / API 调用方] -->|HTTP :8080 /api/**| GW[gateway 网关]
-    GW -->|lb://service-agv 动态路由| SVC[service-agv :8000]
+    FE[前端 / API 调用方] -->|HTTP :8080 /api/**| GW[gateway]
+    GW -->|去掉 /api 前缀<br/>lb://service-agv| SVC[service-agv :8000]
     SVC --> DB[(MySQL<br/>agv_system)]
-    SVC -.-> Redis[(Redis<br/>可选)]
-    SVC --> Nacos[Nacos :8848<br/>注册 / 配置]
-    GW --> Nacos
-    SVC -.-> Sentinel[Sentinel Dashboard<br/>可选]
-    SVC --> Sim[AgvSimulator<br/>每秒步进]
+    SVC --- Cache[LiveStateCache<br/>内存实时快照]
+    Job[stepJob<br/>每轮 tick] --> Sim[AgvSimulator]
     Sim --> AStar[A* 路径规划]
+    Sim --> DB
+    Job --> Cache
+    GW -.-> Nacos[Nacos :8848]
+    SVC -.-> Nacos
 ```
 
-- 所有外部请求建议统一从网关 `http://localhost:8080/api/**` 进入
-- 网关通过 `RewritePath` 去掉 `/api` 前缀，再按服务名 `lb://service-agv` 负载均衡转发
-- `service-agv` 负责全部业务逻辑与车辆仿真，数据持久化到 MySQL
-- 服务启动时会向 Nacos 注册；`seata.enabled=false`，当前不启用分布式事务
+- 外部请求统一走网关 `http://localhost:8080/api/**`，网关用 `RewritePath` 去掉 `/api` 后转发到 `service-agv`。
+- 网关负责 CORS 预检应答，并对 SSE 长连接设置 1 小时响应超时。
+- `service-agv` 承担全部业务逻辑与车辆仿真；读接口（`/agv/list`、`/agv/live`、`/map/current`）读内存快照，不打数据库。
 
----
-
-## 模块说明
+### 模块
 
 | 模块 | 说明 |
 | --- | --- |
-| `agv-system`（根 `pom.xml`） | 父工程，统一依赖版本与打包配置（共享 `lib` 输出） |
-| `agv-model` | 公共模型模块：PO / DTO / Query、统一响应 `Result` / `PageResult`、MyBatis JSON 类型处理器 |
-| `agv-service` | 业务服务聚合模块（`pom` 打包），聚合 `service-agv` |
-| `agv-service/service-agv` | AGV 核心服务：Controller、Service、Mapper、A* 算法、车辆仿真、定时任务 |
-| `gateway` | Spring Cloud Gateway 网关，路由 `/api/**` 到 `service-agv` |
-| `agv/`、`agv-service/agv/` | Maven 构建输出目录：可执行 jar + 公共 `lib/`（**构建生成，不纳入版本库**） |
-| `service-agv/src/test` | 数据结构练习实现与 JUnit 5 单元测试 |
+| `agv-model` | 公共模型：PO / DTO / Query、`Result` / `PageResult`、MyBatis JSON 类型处理器 |
+| `agv-service/service-agv` | 核心服务：Controller、Service、Mapper、A*、仿真、定时任务、实时通道 |
+| `gateway` | Spring Cloud Gateway，路由 `/api/**` → `service-agv` |
+| `agv/`、`agv-service/agv/` | 构建输出（可执行 jar + 共享 `lib/`），构建生成，不纳入版本库 |
 
 ---
 
@@ -143,48 +94,40 @@ flowchart LR
 
 ```
 agv-system
-├── pom.xml                              # 父工程：依赖管理 + 统一打包配置
-├── agv-model/
-│   └── src/main/java/com/lizhi/
-│       ├── domain/
-│       │   ├── po/                      # AgvMap / AgvTask / AgvSnapshot / AgvPath / AgvLog / Node ...
-│       │   ├── dto/                     # 接口出入参对象
-│       │   └── query/                   # 分页查询对象
-│       ├── handler/                     # ListTypeHandler / NodeListTypeHandler（JSON 与 List 互转）
-│       └── result/                      # Result / PageResult
-├── agv-service/
-│   ├── pom.xml
-│   └── service-agv/
-│       ├── src/main/java/com/lizhi/
-│       │   ├── MapMainApplication.java  # 服务启动类（@EnableScheduling）
-│       │   ├── astart/                  # A* 路径规划
-│       │   │   ├── map/GridMap.java     # 栅格地图、邻居、障碍物（权重 -1）
-│       │   │   ├── heuristic/           # Manhattan / Euclidean / Chebyshev
-│       │   │   └── service/AStarSolver.java
-│       │   ├── controller/              # AGV / 地图 / 任务 / 日志 接口
-│       │   ├── service/impl/            # 业务实现
-│       │   ├── mapper/                  # MyBatis Mapper 接口
-│       │   ├── job/stepJob.java         # 定时任务：1 秒步进、在线车辆统计
-│       │   └── utils/
-│       │       ├── AgvSimulator.java    # 车辆仿真核心（移动、耗电、充电）
-│       │       ├── AgvUnlock.java       # 实时路径规划（在缓存的网格模板副本上求解）
-│       │       ├── AgvLockManager.java  # 每车一把锁 + 锁内事务
-│       │       ├── MapCache.java        # 当前地图 / 站点 / 寻路网格模板缓存
-│       │       ├── TickContext.java     # 单次 tick 共享的地图快照与占用路径
-│       │       ├── PageBounds.java      # 分页参数边界
-│       │       ├── AgvConversion.java   # JSON/LinkedHashMap 与强类型对象转换
-│       │       └── AgvCollisionAvoidance.java  # SAT 矩形碰撞检测
-│       ├── src/main/resources/
-│       │   ├── application.yml          # 服务端口、MySQL、Nacos、Sentinel 配置
-│       │   ├── application.properties   # 端口与 Nacos 地址（与 yml 保持一致）
-│       │   └── mapper/*.xml             # MyBatis SQL 映射
-│       └── src/test/java/com/lizhi/     # 数据结构练习与单元测试
-├── gateway/
-│   └── src/main/resources/
-│       ├── application.yml              # 网关端口 8080、Nacos 注册
-│       └── application-route.yml        # /api/** 路由规则
-├── agv/                                 # gateway 构建输出（jar + lib）
-└── agv-service/agv/                     # service-agv 构建输出（jar + lib）
+├── pom.xml                                  # 父工程：依赖版本 + 统一打包配置
+├── agv-model/src/main/java/com/lizhi/
+│   ├── domain/{po,dto,query}/               # AgvMap / AgvTask / AgvSnapshot / AgvPath / AgvLog / Node ...
+│   ├── handler/                             # ListTypeHandler、NodeListTypeHandler（JSON ↔ List）
+│   └── result/                              # Result、PageResult
+├── agv-service/service-agv/src/
+│   ├── main/java/com/lizhi/
+│   │   ├── MapMainApplication.java          # 启动类（@EnableScheduling）
+│   │   ├── astart/                          # A*：GridMap、AStarSolver、heuristic/
+│   │   ├── config/WebConfig.java            # CORS
+│   │   ├── controller/                      # /agv、/map、/task、/log、实时通道、全局异常处理
+│   │   ├── job/stepJob.java                 # 仿真 tick、自动充电、每日在线车辆统计
+│   │   ├── mapper/                          # MyBatis Mapper
+│   │   ├── realtime/                        # LiveStateCache、LiveStreamService（SSE）、HttpCacheUtils
+│   │   ├── service/impl/                    # 业务实现
+│   │   └── utils/
+│   │       ├── AgvSimulator.java            # 单车步进：移动、耗电、充电、完成 / 失败
+│   │       ├── AgvUnlock.java               # 路径规划（在缓存网格模板的副本上求解）
+│   │       ├── AgvLockManager.java          # 每车一把锁 + 锁内事务
+│   │       ├── MapCache.java                # 当前地图 / 站点 / 充电点 / 网格模板缓存
+│   │       ├── TickContext.java             # 单轮 tick 共享的地图快照与占用路径
+│   │       ├── PageBounds.java              # 分页参数边界
+│   │       ├── AgvConversion.java           # LinkedHashMap → 强类型对象
+│   │       └── AgvCollisionAvoidance.java   # SAT 矩形碰撞检测（未接入仿真）
+│   ├── main/resources/
+│   │   ├── application.yml                  # 端口、数据源、Nacos、仿真参数
+│   │   └── mapper/*.xml
+│   └── test/java/com/lizhi/                 # 仿真 / 序列化 / 分页单测 + 数据结构练习
+├── gateway/src/main/resources/              # application.yml（8080）、application-route.yml（路由 + CORS）
+├── sql/
+│   ├── agv_system.sql                       # 建库建表 + 默认 40×30 地图 + 3 台示例车
+│   ├── gen-seed.mjs                         # 生成 agv_system.sql 的脚本
+│   └── optional_indexes.sql                 # 可选索引（默认不执行）
+└── scripts/                                 # 启动、演示数据、接口验收、压测脚本
 ```
 
 ---
@@ -193,321 +136,261 @@ agv-system
 
 ### 1. 环境要求
 
-| 组件 | 版本要求 | 说明 |
+| 组件 | 版本 | 说明 |
 | --- | --- | --- |
-| JDK | **17** | 项目 `maven.compiler.source/target` 均为 17，使用 JDK 8/11 会编译失败 |
+| JDK | 17+ | 编译目标为 17，JDK 8 / 11 无法编译 |
 | Maven | 3.8+ | |
-| MySQL | 8.x | 数据库名默认 `agv_system` |
-| Nacos | 2.x | 默认地址 `127.0.0.1:8848`，用于服务注册与发现 |
-| Redis | 可选 | 已引入依赖，当前代码未实际使用 |
-| Sentinel Dashboard | 可选 | 默认配置地址 `localhost:8080`，注意与网关端口冲突 |
-
-> Windows 下如果默认 `java -version` 不是 17，请先切换 `JAVA_HOME`：
-> `set JAVA_HOME=C:\path\to\jdk-17`（PowerShell：`$env:JAVA_HOME="C:\path\to\jdk-17"`）
+| MySQL | 8.x | 默认库名 `agv_system` |
+| Nacos | 2.x | 仅[方式一](#方式一使用-nacos)需要 |
+| Node.js | 18+ | 仅运行 `scripts/*.mjs` 验收 / 压测脚本时需要 |
 
 ### 2. 初始化数据库
 
-创建数据库 `agv_system`（与 `application.yml` 中 `spring.datasource.url` 保持一致），并执行以下建表语句：
-
-```sql
-CREATE DATABASE IF NOT EXISTS agv_system DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-USE agv_system;
-
--- 地图（含版本链）
-CREATE TABLE IF NOT EXISTS agv_map (
-    map_id      INT PRIMARY KEY AUTO_INCREMENT,
-    map_code    VARCHAR(64)  NOT NULL COMMENT '地图唯一编码',
-    map_name    VARCHAR(64)           COMMENT '地图名称',
-    width       INT                   COMMENT '地图宽度（格）',
-    height      INT                   COMMENT '地图高度（格）',
-    cell_size   INT                   COMMENT '单元格大小',
-    description VARCHAR(255)          COMMENT '描述',
-    obstacles   JSON                  COMMENT '障碍物坐标列表',
-    stations    JSON                  COMMENT '站点列表（id/type/x/y）',
-    version     INT DEFAULT 0         COMMENT '版本号',
-    is_current  INT DEFAULT 0         COMMENT '1=当前版本 0=历史版本',
-    parent_id   INT DEFAULT 0         COMMENT '上一版本地图ID，0为首版',
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AGV 地图';
-
--- AGV 实时状态快照
-CREATE TABLE IF NOT EXISTS agv_snapshot (
-    agv_code     VARCHAR(32) PRIMARY KEY COMMENT 'AGV 编号',
-    x            INT DEFAULT 0,
-    y            INT DEFAULT 0,
-    direction    INT DEFAULT 0     COMMENT '朝向角度',
-    status       VARCHAR(16) DEFAULT 'idle' COMMENT 'idle/running/stopping/charging/error',
-    battery      DOUBLE DEFAULT 100 COMMENT '电量百分比',
-    speed        INT DEFAULT 0     COMMENT '速度 cm/s',
-    task_id      INT NULL          COMMENT '当前任务ID',
-    description  VARCHAR(255)      COMMENT '当前任务描述',
-    last_update  VARCHAR(64)       COMMENT '最后更新时间（ISO8601）',
-    planned_path TEXT              COMMENT '规划路径（JSON 节点数组）',
-    path_index   INT DEFAULT 0     COMMENT '当前路径索引',
-    is_charge    INT DEFAULT 0     COMMENT '0=未充电 1=充电中'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AGV 状态快照';
-
--- 任务
-CREATE TABLE IF NOT EXISTS agv_task (
-    task_id            INT PRIMARY KEY AUTO_INCREMENT,
-    task_code          VARCHAR(64) NOT NULL COMMENT '任务编号',
-    agv_code           VARCHAR(32)          COMMENT '执行车辆',
-    task_type          VARCHAR(32)          COMMENT '物料运输/充电',
-    status             VARCHAR(16)          COMMENT 'waiting/processing/paused/completed/failed/cancelled',
-    priority           VARCHAR(16)          COMMENT 'low/medium/high',
-    source             VARCHAR(64)          COMMENT '起点站点编号',
-    destination        VARCHAR(64)          COMMENT '终点站点编号',
-    start_time         DATETIME             COMMENT '开始时间',
-    estimated_end_time DATETIME             COMMENT '预计结束时间',
-    actual_end_time    DATETIME             COMMENT '实际结束时间',
-    description        VARCHAR(255)         COMMENT '任务描述',
-    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    start_point_x      INT                  COMMENT '起点 X',
-    start_point_y      INT                  COMMENT '起点 Y',
-    pass_mid_point     INT DEFAULT 0        COMMENT '0=无需经过起点 1=需先经过起点'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AGV 任务';
-
--- 车辆占用路径（用于实时避让）
-CREATE TABLE IF NOT EXISTS agv_path (
-    path_id  BIGINT PRIMARY KEY AUTO_INCREMENT,
-    agv_code VARCHAR(32),
-    x        INT,
-    y        INT,
-    type     VARCHAR(16) DEFAULT 'path',
-    map_id   INT,
-    KEY idx_agv_code (agv_code),
-    KEY idx_map_id (map_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AGV 占用路径点';
-
--- 系统日志
-CREATE TABLE IF NOT EXISTS agv_log (
-    log_id     INT PRIMARY KEY AUTO_INCREMENT,
-    `timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    level      VARCHAR(16)  COMMENT 'info/warning/error',
-    message    VARCHAR(500) COMMENT '日志内容',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统日志';
+```bash
+mysql -uroot -p --default-character-set=utf8mb4 < sql/agv_system.sql
 ```
 
-> 上述 DDL 根据实体类与 Mapper SQL 反推整理，字段含义与代码保持一致；如已有生产库，请以实际表结构为准。
+脚本会创建 `agv_map`、`agv_snapshot`、`agv_task`、`agv_path`、`agv_log` 五张表，并写入一份默认地图
+（40×30 栅格，8 组货架、6 个作业站点 S1–S6、2 个充电站 C1 / C2）和 3 台示例车辆，启动后即可直接下发任务。
 
-### 3. 启动基础设施
+### 3. 编译
+
+仓库不包含可执行 jar（`agv/`、`agv-service/agv/` 已在 `.gitignore` 中排除），启动前需先在本地构建：
 
 ```bash
-# 1) 启动 MySQL（默认 3306，账号 root/root）
-# 2) 启动 Nacos（单机模式）
-# Windows
-startup.cmd -m standalone
-# Linux / macOS
-sh startup.sh -m standalone
-
-# 3)（可选）启动 Redis
-# 4)（可选）启动 Sentinel Dashboard，注意修改端口避免与网关 8080 冲突
-```
-
-### 4. 修改配置
-
-`agv-service/service-agv/src/main/resources/application.yml`：
-
-```yaml
-spring:
-  datasource:
-    url: jdbc:mysql://localhost:3306/agv_system?allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
-    username: root
-    password: root            # 按实际环境修改
-  cloud:
-    nacos:
-      server-addr: 127.0.0.1:8848   # 按实际环境修改
-server:
-  port: 8000                  # 业务服务端口
-```
-
-`gateway/src/main/resources/application.yml`：
-
-```yaml
-spring:
-  cloud:
-    nacos:
-      discovery:
-        server-addr: 127.0.0.1:8848
-server:
-  port: 8080                  # 网关端口
-```
-
-### 5. 编译
-
-```bash
-# 需确保 JAVA_HOME 指向 JDK 17
 mvn -DskipTests clean package
 ```
 
-构建产物：
-
 | 产物 | 路径 |
 | --- | --- |
-| 网关 | `agv/gateway-1.0-SNAPSHOT.jar` |
-| AGV 服务 | `agv-service/agv/service-agv-1.0-SNAPSHOT.jar` |
-| 公共依赖 | `agv/lib/`、`agv-service/agv/lib/` |
+| 业务服务 | `agv-service/agv/service-agv-1.0-SNAPSHOT.jar`（依赖在同级 `lib/`） |
+| 网关 | `agv/gateway-1.0-SNAPSHOT.jar`（依赖在同级 `lib/`） |
 
-### 6. 启动服务
+### 4. 启动
 
-先启动 `service-agv`，再启动 `gateway`（保证 Nacos 中已有服务实例）：
+#### 方式一：使用 Nacos
+
+1. 启动 Nacos 单机版：`startup.cmd -m standalone`（Windows）或 `sh startup.sh -m standalone`（Linux / macOS）。
+2. 按需修改 `agv-service/service-agv/src/main/resources/application.yml` 中的数据库账号与 Nacos 地址。
+3. 先启动业务服务，再启动网关：
 
 ```bash
-java -jar agv-service/agv/service-agv-1.0-SNAPSHOT.jar
+java -jar agv-service/agv/service-agv-1.0-SNAPSHOT.jar --spring.datasource.password=<你的密码>
+```
+
+```bash
 java -jar agv/gateway-1.0-SNAPSHOT.jar
 ```
 
-或在 IDE 中分别运行：
+#### 方式二：不依赖 Nacos 启动（推荐本地开发）
 
-- `com.lizhi.MapMainApplication`（业务服务，端口 8000）
-- `com.lizhi.GatewayMainApplication`（网关，端口 8080）
+用 Spring Cloud 的静态服务发现代替 Nacos。Windows 下可直接用脚本（业务服务 18000、网关 8080）：
 
-### 7. 验证
+```powershell
+$env:AGV_MYSQL_PASSWORD = '<你的密码>'
+powershell -ExecutionPolicy Bypass -File scripts\start-backend.ps1
+```
+
+数据库密码只从环境变量 `AGV_MYSQL_PASSWORD` 或 `-MysqlPassword` 参数读取，缺省时交互式输入，不会写入仓库。
+其它系统可以手动启动，等价参数如下：
 
 ```bash
-# 通过网关访问（/api 前缀会被 RewritePath 去掉）
-curl http://localhost:8080/api/agv/list -X POST
+java -jar agv-service/agv/service-agv-1.0-SNAPSHOT.jar \
+  --server.port=18000 \
+  --spring.datasource.password=<你的密码> \
+  --spring.cloud.nacos.discovery.enabled=false \
+  --spring.cloud.nacos.config.enabled=false \
+  --spring.cloud.service-registry.auto-registration.enabled=false \
+  --spring.cloud.sentinel.eager=false
+```
 
-# 直连业务服务
-curl http://localhost:8000/agv/list -X POST
+```bash
+java -jar agv/gateway-1.0-SNAPSHOT.jar \
+  --spring.cloud.nacos.discovery.enabled=false \
+  --spring.cloud.service-registry.auto-registration.enabled=false \
+  "--spring.cloud.discovery.client.simple.instances.service-agv[0].uri=http://localhost:18000"
+```
+
+### 5. 验证
+
+```bash
+curl -X POST http://localhost:8080/api/agv/list
+```
+
+可选：写入演示数据（2 条运输任务 + 1 条充电任务）：
+
+```bash
+node scripts/seed-demo.mjs
 ```
 
 ---
 
-## 接口一览
+## 接口说明
 
-> 通过网关访问时，统一在各个接口路径前加 `/api`。
-> 例：`POST http://localhost:8080/api/agv/path` 实际转发到 `POST http://service-agv/agv/path`。
-
-### AGV 管理 `AgvController`（`/agv`）
-
-| 方法 | 路径 | 说明 | 请求体 |
-| --- | --- | --- | --- |
-| POST | `/agv/batch/{mun}` | 动态批量加车（连续编号，返回新编号 `string[]`；数量 1..50） | - |
-| POST | `/agv/preview` | 路径预览：只做 A* 规划不落库，返回 `Node[]` | `AgvTaskDTO` |
-| GET | `/agv/live` | 合并实时快照（车辆+占用路径+地图元信息+etag），`If-None-Match` 命中返回 304 | - |
-| GET | `/agv/stream` | SSE 实时推送（`event: state`，状态变化时推帧，15s 心跳） | - |
-| POST | `/agv/charge/{agvCode}` | 遥控车辆前往最近充电站 | - |
-| GET | `/agv/{agvCode}` | 查询指定车辆状态 | - |
-| POST | `/agv/list` | 查询全部车辆状态 | - |
-| POST | `/agv/report` | 上报车辆当前位置 | `AgvSnapshotDTO` |
-| POST | `/agv/path` | 创建并开始执行任务 | `AgvTaskDTO` |
-| POST | `/agv/stop` | 暂停车辆运行 | `AgvSnapshotDTO` |
-| POST | `/agv/start` | 恢复车辆运行 | `AgvSnapshotDTO` |
-| POST | `/agv/speed` | 调节车辆速度 | `AgvSnapshotDTO`（`agvCode`、`speed`） |
-| POST | `/agv/clear` | 清除所有任务 | - |
-
-创建任务请求示例：
-
-```json
-{
-  "agvCode": "AGV001",
-  "taskCode": "T20261102001",
-  "startPoint": { "id": "S1", "x": 10, "y": 10 },
-  "endPoint":   { "id": "S2", "x": 50, "y": 40 },
-  "currentPoint": { "x": 0, "y": 0 }
-}
-```
-
-### 地图管理 `AgvMapController`（`/map`）
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/map/save` | 保存地图（生成新版本） |
-| GET | `/map/current` | 获取当前地图、站点与车辆路径 |
-| POST | `/map/reset` | 重置 / 获取当前地图 |
-| GET | `/map/station` | 获取当前地图站点列表 |
-
-### 任务管理 `AgvTaskController`（`/task`）
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/task/page` | 任务分页查询（`page`、`pageSize`、`taskCode`、`status`、`agvCode`）；`page<1` 按 1，`pageSize` 缺省 10、上限 100，`taskCode` 最长 64 |
-| GET | `/task/cancel/{taskId}` | 取消任务 |
-
-### 日志管理 `AgvLogController`（`/log`）
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/log/page` | 系统日志分页查询（`page`、`pageSize`、`level`、`message` 模糊）；分页边界同上 |
+经网关访问时在路径前加 `/api`，例如 `POST http://localhost:8080/api/agv/path` 转发到 `service-agv` 的 `POST /agv/path`。
 
 ### 统一响应
 
 ```json
+{ "code": 200, "msg": null, "data": {} }
+```
+
+| 情况 | HTTP | `code` | 说明 |
+| --- | --- | --- | --- |
+| 成功 | 200 | `200` | |
+| 业务失败 | 200 | `204` | `msg` 为原因：参数缺失、车辆不存在、无任务可启停、路径规划失败、JSON 解析失败等 |
+| 分页 | 200 | `200` | `data` 为 `{ "total": 100, "records": [...] }` |
+
+例外：`GET /agv/live` 直接返回快照对象，不套 `Result` 壳；`/agv/live`、`/map/current` 可能返回 HTTP 304。
+
+### 车辆与任务 `/agv`
+
+| 方法 | 路径 | 说明 | 请求体 |
+| --- | --- | --- | --- |
+| POST | `/agv/list` | 全部车辆状态（读内存快照） | - |
+| GET | `/agv/{agvCode}` | 单车状态及其占用路径 | - |
+| POST | `/agv/batch/{n}` | 批量加车，`n` 取 1–50，返回新编号 `string[]` | - |
+| POST | `/agv/path` | 下发任务并开始执行，返回规划路径 `[{x,y}]` | `AgvTaskDTO` |
+| POST | `/agv/preview` | 只规划路径，不建任务、不改车辆、不写库 | `AgvTaskDTO` |
+| POST | `/agv/stop` | 暂停（车辆须有任务） | `{ "agvCode" }` |
+| POST | `/agv/start` | 恢复（车辆须有任务） | `{ "agvCode" }` |
+| POST | `/agv/speed` | 调速，`speed` 取 0–1000 cm/s | `{ "agvCode", "speed" }` |
+| POST | `/agv/report` | 上报状态，**只覆盖请求中出现的字段** | `AgvSnapshotDTO` |
+| POST | `/agv/charge/{agvCode}` | 前往最近可达充电站（会取消当前任务） | - |
+| POST | `/agv/clear` | 取消全部任务，所有车辆复位为空闲 | - |
+| GET | `/agv/live` | 合并实时快照，见[实时数据通道](#实时数据通道) | - |
+| GET | `/agv/stream` | SSE 实时推送 | - |
+| GET | `/agv/stream/status` | 当前 SSE 连接数 | - |
+
+下发任务示例（`currentPoint` 可省略，省略时取车辆当前位置；`taskCode` 可省略，最长 64 字符）：
+
+```json
 {
-  "code": 200,
-  "msg": null,
-  "data": {}
+  "agvCode": "AGV001",
+  "taskCode": "T20261118001",
+  "startPoint": { "id": "S1", "x": 2, "y": 2 },
+  "endPoint":   { "id": "S6", "x": 37, "y": 27 },
+  "currentPoint": { "x": 2, "y": 1 }
 }
 ```
 
-- `code = 200`：成功
-- `code = 204`：业务失败（`msg` 为错误信息）
-- 分页数据：`{ "total": 100, "records": [] }`
+当前位置与起点不同时，车辆先开到起点再前往终点。路径节点只包含坐标：`[{"x":2,"y":1},{"x":2,"y":2},...]`。
+
+### 地图 `/map`
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/map/current` | 当前地图（含障碍、站点、占用路径）；支持 `If-None-Match` 或 `?version=` 命中返回 304 |
+| POST | `/map/save` | 保存为新版本，缺省字段继承当前版本 |
+| POST | `/map/reset` | 返回当前地图（不做写操作） |
+| GET | `/map/station` | 当前地图站点列表（`type` 为 `station` 或 `charge`） |
+
+### 任务与日志
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/task/page` | 任务分页，过滤：`taskCode`（模糊）、`status`、`agvCode` |
+| GET | `/task/cancel/{taskId}` | 取消任务，车辆复位为空闲 |
+| POST | `/log/page` | 日志分页，过滤：`level`、`message`（模糊） |
+
+分页规则：`page` 小于 1 按第 1 页；`pageSize` 缺省 10、上限 100（超出按 100 截断）；`taskCode` 超过 64 字符返回业务错误。
+
+### 状态取值
+
+| 对象 | 字段 | 取值 |
+| --- | --- | --- |
+| 车辆 | `status` | `idle` 空闲 · `running` 行驶 · `stopping` 暂停 · `charging` 充电中 |
+| 车辆 | `isCharge` | `0` 普通 · `1` 正在执行充电任务 |
+| 任务 | `status` | `processing` · `paused` · `completed` · `failed` · `cancelled` |
+| 任务 | `taskType` | `物料运输` · `充电` |
+| 日志 | `level` | `info` · `warning` · `error` |
 
 ---
 
-## 核心流程与算法
+## 实时数据通道
+
+仿真每轮 tick 结束、以及每个写接口返回前，都会重建一次内存快照 `LiveStateCache` 并计算内容指纹（etag）。
+因此**写接口返回后立即读，一定能读到新状态**。
+
+### `GET /agv/live`
+
+```json
+{
+  "timestamp": "2026-11-18T08:00:00Z",
+  "etag": "\"a67f47fb...\"",
+  "map":   { "mapId": 1, "mapName": "默认仓储地图", "version": 1, "width": 40, "height": 30 },
+  "cars":  [{ "agvCode": "AGV001", "x": 2, "y": 1, "status": "running", "battery": 87.5,
+              "taskId": 12, "pathIndex": 3, "plannedPath": [{ "x": 2, "y": 1 }], "...": "..." }],
+  "paths": [{ "agvCode": "AGV001", "x": 2, "y": 2, "type": "path" }]
+}
+```
+
+带 `If-None-Match: <上次的 etag>` 请求时，内容未变返回 **HTTP 304**（无 body）。轮询时空闲场景基本全是 304。
+
+### `GET /agv/stream`（SSE）
+
+- 事件名 `state`，`data` 与 `/agv/live` 结构相同；连接建立后先推一帧当前快照。
+- 只在 etag 变化时推帧，每轮 tick 最多一帧；每 15 秒发一次注释行心跳。
+- 单连接 30 分钟超时，浏览器 `EventSource` 会自动重连。
+
+```js
+const es = new EventSource('http://localhost:8080/api/agv/stream')
+es.addEventListener('state', (e) => render(JSON.parse(e.data)))
+```
+
+---
+
+## 核心机制
 
 ### 任务执行流程
 
 ```mermaid
 sequenceDiagram
     participant C as 调用方
-    participant G as Gateway
     participant S as service-agv
     participant DB as MySQL
-    C->>G: POST /api/agv/path
-    G->>S: POST /agv/path（RewritePath 去掉 /api）
-    S->>DB: 查询车辆与当前地图
-    S->>S: A* 规划「当前位置→起点→终点」
-    S->>DB: 写入任务、更新车辆规划路径
-    S-->>C: 返回路径节点列表
-    loop 上一轮结束后 1 秒（stepJob，fixedDelay）
-        S->>S: AgvSimulator.step：移动 / 耗电 / 充电
+    C->>S: POST /agv/path
+    S->>S: A* 规划「当前位置 → 起点 → 终点」
+    S->>DB: 车锁内单事务：写任务、更新车辆、写日志
+    S-->>C: 返回路径 [{x,y}]
+    loop 每轮 tick（上一轮结束 1 秒后）
+        S->>S: 逐车步进：重规划 / 移动 1 格 / 耗电 / 充电
         S->>DB: 只写发生变化的车辆、任务、占用路径
+        S->>S: 重建实时快照，变化时推送 SSE
     end
 ```
 
 ### A* 路径规划
 
-1. `AgvUnlock.realTimePath()` 从 `MapCache` 取当前地图的 `GridMap` 模板并复制一份：
-   - 障碍物、站点权重为 `-1`（不可通行）
-   - 起点与终点重新设回可通行
-   - 其他车辆已占用的路径点权重为 `1`（可通行，与历史行为一致，不产生绕行）
-2. `AStarSolver` 使用 `openList` / `closedList` 迭代扩展，按 `f = g + h` 选取最小代价节点
-3. `g` 的估算：对角移动使用欧几里得距离，直线移动使用曼哈顿距离；`h` 使用曼哈顿距离
-4. 达到目标后通过 `parent` 指针回溯并反转，得到完整路径（`parent`/`cost`/`g`/`h` 仅内部使用，接口响应与 `planned_path` 列只保留 `x`/`y`）
+1. 从 `MapCache` 取当前地图的网格模板并复制一份：障碍物、站点不可通行（权重 `-1`），起点与终点设为可通行。
+2. `AStarSolver` 按 `f = g + h` 扩展节点；直线移动用曼哈顿距离、对角移动用欧几里得距离计算 `g`，`h` 用曼哈顿距离。
+3. 到达终点后沿 `parent` 回溯得到路径。`parent` / `g` / `h` / `cost` 只在算法内部使用，接口响应与 `planned_path` 列只保留坐标。
+4. 无解时写一条 `error` 日志：下发任务接口返回业务错误；仿真中则把该任务置为 `failed` 并复位车辆，不影响其它车辆。
 
-### 车辆仿真与充电
+### 车辆仿真
 
-- `AgvSimulator.createAndStart()` 只写库；所有车辆由 `stepJob` 统一推进
-- 移动：每次最多移动 1 格，方向角按八方向更新
-- 耗电：`max(0.1, speed / 1000)` 每步，速度越快耗电越多
-- 低电量：电量 ≤ 30% 时自动规划前往 `type = "charge"` 的最近充电站（本地 Service 调用，失败后按 `agv.sim.auto-charge-cooldown-ms` 冷却再试）
-- 充电：`charging` 状态每秒恢复 5% 电量，> 95% 后转为 `idle` 并完成任务
+- **移动**：每轮 tick 最多 1 格，方向角按八方向更新。
+- **耗电**：非空闲时每轮减 `max(0.1, speed / 1000)`。
+- **自动充电**：电量 ≤ 30% 且不在充电任务中时，调用充电服务前往最近可达充电站；失败后按冷却时间（默认 5 秒）再试。
+- **充电**：到达充电站转为 `charging`，每轮 +5%，超过 95% 后任务完成、车辆转为空闲。
 
 ### 仿真循环与并发模型
 
-每轮 tick（`stepJob.steploop`）：读一次全部车辆 → 准备 `TickContext`（地图取缓存、`agv_path` 整轮只查一次）→
-逐车 `AgvSimulator.step` → 重建一次内存实时快照。
+每轮 tick（`stepJob.steploop`）：读一次全部车辆 → 准备 `TickContext`（地图取缓存、占用路径整轮只查一次）→
+逐车 `AgvSimulator.step` → 重建一次实时快照。调度使用 `fixedDelay`，上一轮结束 1 秒后才开始下一轮，不会重叠或补拍。
 
-- **车锁**：`AgvLockManager` 为每台车维护一把可重入锁。tick 的单车步进，以及建任务、充电、启停、调速、
-  上报、取消、清空等所有写 `agv_snapshot` 的入口都先拿车锁再"读-算-写"。写请求只与同一台车互斥，
-  不再被整轮 tick 阻塞。**新增写车辆状态的代码必须走 `AgvLockManager`**，否则会重新出现 tick 用旧快照覆盖的问题。
-- **事务**：加锁顺序固定为"先车锁、后事务"（`inLockedTx`）。任务 / 车辆 / 日志 / 占用路径的多表写在同一事务内，
-  失败整体回滚；`saveMap` 的"旧版本置历史 + 插入新版本"同理。
-- **只写变化**：步进前后比较车辆与任务，没有变化不发 UPDATE（空闲车不再每秒空写）；
-  `lastUpdate` 的含义相应变为"状态最后一次变化的时间"。
-- **占用路径**：只在重规划时重写，1 次 delete + 1 次多值 insert（超过 500 点分片）。
-- **地图缓存**：`MapCache` 缓存当前地图、强类型站点、充电点和寻路网格模板；TTL 过期后只查版本指纹
-  （`map_id`/`version`/`updated_at`），`saveMap` 提交后主动失效。
-- **单车容错**：某台车步进抛异常只回滚并跳过这台车；A* 无解时把该任务置为 `failed` 并复位车辆，不再中断整轮 tick。
+- **每车一把锁**：`AgvLockManager` 为每台车维护一把可重入锁。tick 步进以及下发任务、充电、启停、调速、上报、取消、
+  清空等所有写车辆状态的入口，都先拿车锁再"读 → 算 → 写"。写请求只和同一台车互斥，不会被整轮 tick 阻塞，
+  tick 也不会用旧数据覆盖刚下发的任务。
+- **先锁后事务**：多表写（任务 / 车辆 / 日志 / 占用路径）在车锁内的同一事务完成，失败整体回滚；保存地图同样在单事务内完成。
+- **只写变化**：步进前后比较车辆与任务，无变化不发 UPDATE；`lastUpdate` 表示状态最后一次变化的时间。
+- **占用路径**：只在重规划时重写，1 次 delete + 1 次批量 insert（每批最多 500 点）。
+- **地图缓存**：缓存当前地图、站点、充电点和网格模板；TTL 到期后只查版本指纹（`map_id` / `version` / `updated_at`），保存地图后立即失效。
+- **单车容错**：某台车步进异常只回滚并跳过这台车，其它车辆照常推进。
 
-本机实测（MySQL 8.0，20 台车 / 10 台运行，`scripts/bench-tick.mjs`，30s）：
+> **扩展注意**：新增任何写 `agv_snapshot` 的代码都必须经过 `AgvLockManager`，否则会重新出现 tick 覆盖写入的问题。
+
+性能实测（MySQL 8.0，20 台车 / 10 台运行，`scripts/bench-tick.mjs`，30 秒）：
 
 | 指标 | 优化前 | 优化后 |
 | --- | --- | --- |
@@ -516,62 +399,58 @@ sequenceDiagram
 | SELECT / 秒 | 611 | 120 |
 | `/agv/path` 最大响应体 | 241.7 KB | 2.0 KB |
 
-> 绝对值取决于磁盘 fsync 速度（测试机较慢），请在目标环境用同一脚本复测。
-
-### 碰撞检测（可选）
-
-`AgvCollisionAvoidance` 使用分离轴定理（SAT）计算两个旋转矩形在四条轴上的投影区间，判断是否重叠。`stepJob` 中相关逻辑目前处于注释状态，可按需开启。
+绝对值与磁盘 fsync 速度有关，请在目标环境用同一脚本复测。
 
 ---
 
-## 构建与部署
+## 配置项
 
-### 共享依赖打包机制
+`agv-service/service-agv/src/main/resources/application.yml`，均可用 `--key=value` 启动参数覆盖：
 
-根 `pom.xml` 对打包行为做了统一配置：
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `server.port` | `8000` | 业务服务端口 |
+| `spring.datasource.url` | `jdbc:mysql://localhost:3306/agv_system?...` | 数据库地址 |
+| `spring.datasource.username` / `password` | `root` / `root` | 数据库账号，生产环境请改用环境变量 |
+| `spring.cloud.nacos.server-addr` | `127.0.0.1:8848` | Nacos 地址 |
+| `agv.sim.tick-delay-ms` | `1000` | 上一轮 tick 结束到下一轮开始的间隔 |
+| `agv.sim.replan-every-cells` | `1` | 每走几格重规划一次。`1` 为每轮都重规划；大于 1 时走满 N 格、下一格被其它车占用或车辆偏离路径才重规划 |
+| `agv.sim.dirty-check` | `true` | `false` 时每轮都写车辆与任务（旧行为） |
+| `agv.sim.auto-charge-cooldown-ms` | `5000` | 同一台车两次自动充电尝试的最小间隔 |
+| `agv.sim.map-cache-ttl-ms` | `1000` | 地图缓存多久检查一次版本指纹 |
 
-- `maven-jar-plugin`：生成 jar 的 `MANIFEST.MF`，设置 `Class-Path` 指向 `lib/`
-- `maven-dependency-plugin`：`package` 阶段将所有依赖复制到模块的 `${boot-jar-output}/lib`
-- `spring-boot-maven-plugin`：以 `ZIP` 布局重新打包，且不内嵌第三方依赖，输出到 `${boot-jar-output}`
+网关（`gateway/src/main/resources/`）：端口 `8080`；路由 `/api/** → lb://service-agv`；CORS 全放开；
+`httpclient.response-timeout: 1h` 保证 SSE 长连接不被网关断开。
 
-因此两个可执行 jar 共用各自的 `lib/` 目录，部署时需保持 `jar + lib` 的相对位置不变。
+---
 
-### 部署目录示例
+## 测试与验收
 
-```
-deploy/
-├── agv/
-│   ├── gateway-1.0-SNAPSHOT.jar
-│   └── lib/
-└── service/
-    ├── service-agv-1.0-SNAPSHOT.jar
-    └── lib/
-```
+### 单元测试
 
 ```bash
-java -jar deploy/service/service-agv-1.0-SNAPSHOT.jar
-java -jar deploy/agv/gateway-1.0-SNAPSHOT.jar
+mvn test
 ```
 
-> 如需修改输出目录，可调整根 `pom.xml` 中的 `boot-jar-output` 属性及各子模块的覆盖配置。
+| 测试类 | 覆盖内容 |
+| --- | --- |
+| `agv/AgvSimulatorTest` | 空闲车不写库、逐格移动与完成、先经取货点、路径丢失 / 无解、重规划间隔、偏离路径立即重规划、充电全过程、已删除车辆不回写 |
+| `agv/GridMapAndPageBoundsTest` | 网格副本与模板隔离、分页边界 |
+| `handler/NodeJsonTest` | `Node` 响应与落库格式只含 `x` / `y`，兼容旧格式反序列化 |
+| `method/**`、`test.java` | 数据结构练习（链表、队列、堆、树、哈希表等），与业务无关 |
 
----
+### 接口验收与压测
 
-## 单元测试
+需要服务已启动。脚本默认访问网关 `http://localhost:8080/api`，可用 `AGV_API_BASE` 改为直连业务服务。
+**脚本会加车、下发并清空任务，请在测试库上运行。**
 
-测试代码位于 `agv-service/service-agv/src/test/java/com/lizhi/`：
-
-- `method/array`：动态数组、二分查找、数组栈
-- `method/link`：单向链表、双向链表、带哨兵双向链表、链表栈
-- `method/queue`：数组队列、链表队列、双端队列、阻塞队列、优先级队列
-- `method/heap`：大顶堆、小顶堆
-- `method/tree`：二叉搜索树、AVL 树、红黑树、二叉树题目
-- `method/hash`：哈希表及其 JUnit 5 测试
-- `test.java`：各类数据结构的综合验证
-- `agv/AgvSimulatorTest`：仿真状态机（空闲不写库、逐格移动与完成、经取货点、路径丢失 / 无解、重规划间隔、充电）
-- `agv/GridMapAndPageBoundsTest`、`handler/NodeJsonTest`：网格副本隔离、分页边界、`Node` 序列化格式
-
-接口级回归与压测（需要服务已启动，`AGV_API_BASE` 可指向网关或直连 service-agv）：
+| 脚本 | 用途 |
+| --- | --- |
+| `scripts/verify-api-v2.mjs` | 接口回归：分页过滤、批量加车、路径预览不落库、新车可执行任务、CORS |
+| `scripts/verify-realtime.mjs` | 实时通道：`/agv/live` 304、SSE 帧率与心跳、写后立即读一致性 |
+| `scripts/verify-api.mjs`、`scripts/verify-backend-fixes.mjs` | 早期版本的接口与缺陷修复回归 |
+| `scripts/bench-tick.mjs` | tick 压测：tick 耗时分位、每秒 SQL 语句数、写 / 读接口延迟 |
+| `scripts/seed-demo.mjs` | 写入演示任务 |
 
 ```bash
 node scripts/verify-api-v2.mjs
@@ -581,58 +460,76 @@ node scripts/verify-api-v2.mjs
 node scripts/verify-realtime.mjs
 ```
 
-```bash
-node scripts/bench-tick.mjs
-```
-
-执行测试：
+压测示例（直连业务服务；设置 `AGV_LOG_FILE` 可解析 tick 耗时，需开启 `--logging.level.com.lizhi.job=debug`；
+设置 `AGV_MYSQL_PASSWORD` 可采集 MySQL 语句计数）：
 
 ```bash
-mvn test
+AGV_API_BASE=http://localhost:18000 BENCH_CARS=20 BENCH_RUNNING=10 BENCH_SECONDS=30 node scripts/bench-tick.mjs
 ```
 
-> `src/test` 下的数据结构实现用于学习与验证，不参与主业务运行。
+验收脚本的结果明细写入 `.verify/`（已在 `.gitignore` 中）。
 
 ---
 
-## 配置说明
+## 构建与部署
 
-| 配置项 | 位置 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `server.port` | `service-agv/application.yml` | `8000` | 业务服务端口 |
-| `spring.datasource.*` | `service-agv/application.yml` | `root/root` | MySQL 连接信息 |
-| `spring.cloud.nacos.server-addr` | `service-agv/application.yml` | `127.0.0.1:8848` | Nacos 地址 |
-| `spring.cloud.nacos.config.import-check.enabled` | `service-agv/application.yml` | `false` | 关闭 Nacos Config 强制导入检查 |
-| `spring.cloud.sentinel.transport.dashboard` | `service-agv/application.yml` | `localhost:8080` | Sentinel 控制台地址 |
-| `seata.enabled` | `service-agv/application.yml` | `false` | 是否启用 Seata |
-| `agv.sim.tick-delay-ms` | `service-agv/application.yml` | `1000` | 两轮 tick 的间隔（上一轮结束到下一轮开始） |
-| `agv.sim.replan-every-cells` | `service-agv/application.yml` | `1` | 每走几格重规划一次；`1` = 每个 tick（旧行为）。大于 1 时走满 N 格、下一格被其它车占用或车辆偏离路径才重规划 |
-| `agv.sim.dirty-check` | `service-agv/application.yml` | `true` | `false` 时恢复"每个 tick 都写车辆 / 任务" |
-| `agv.sim.auto-charge-cooldown-ms` | `service-agv/application.yml` | `5000` | 同一台车两次自动充电尝试的最小间隔 |
-| `agv.sim.map-cache-ttl-ms` | `service-agv/application.yml` | `1000` | 地图缓存多久探测一次版本指纹 |
-| `server.port` | `gateway/application.yml` | `8080` | 网关端口 |
-| `spring.cloud.gateway.routes` | `gateway/application-route.yml` | `/api/** → lb://service-agv` | 路由与路径重写规则 |
+根 `pom.xml` 统一了打包方式：
+
+- `maven-dependency-plugin` 在 `package` 阶段把依赖复制到 `${boot-jar-output}/lib`；
+- `maven-jar-plugin` 在 `MANIFEST.MF` 中把 `Class-Path` 指向 `lib/`；
+- `spring-boot-maven-plugin` 以 ZIP 布局打包且不内嵌第三方依赖。
+
+所以部署时要保持 **jar 与同级 `lib/` 的相对位置不变**：
+
+```
+deploy/
+├── gateway/
+│   ├── gateway-1.0-SNAPSHOT.jar
+│   └── lib/
+└── service-agv/
+    ├── service-agv-1.0-SNAPSHOT.jar
+    └── lib/
+```
+
+修改输出目录请调整根 `pom.xml` 的 `boot-jar-output` 属性。
 
 ---
 
-## 已知限制与注意事项
+## 已知限制
 
-- **无鉴权**：接口未做登录 / 权限校验，请勿直接暴露到公网。
-- **前端独立交付**：配套前端（Apple 风格控制台）已作为独立工程交付在 `D:\VSCode\agv-system`（Vue 3 + TS + Vite），通过网关 `http://localhost:8080/api` 对接；本文档只覆盖后端。前端启动与操作说明见该目录 `README.md`。
-- **明文数据库凭据**：`application.yml` 中默认 `root/root`，生产环境请改用环境变量或 Nacos 配置。
-- **端口冲突**：Sentinel Dashboard 默认配置为 `localhost:8080`，与网关端口相同，如需使用 Sentinel 请修改其中一个端口。
-- **Seata 已关闭**：`seata.enabled=false`，跨服务事务未启用。
-- **构建产物不入库**：`agv/` 与 `agv-service/agv/` 下的可执行 jar 及 `lib/` 已从版本库移除（`.gitignore` 排除），请执行 `mvn -DskipTests package` 在本地生成后再启动；仓库中不再包含 jar 包。
-- **仿真属性**：车辆移动、耗电、充电、定时任务均为模拟逻辑，接入真实车辆时需替换 `AgvSimulator` 与控制层。
-- **碰撞检测未启用**：`AgvCollisionAvoidance` 仅为工具类，仿真循环未调用。
-- **车辆之间不避让**：`AgvUnlock.realTimePath` 对其它车辆的占用路径按"可通行"处理（历史代码先标记为不可通行、求解前又恢复，净效果如此），多车路径可以重叠。要启用真正的避让需同时设计对向会车 / 死锁的处理。
-- **单实例假设**：车锁、地图缓存、自动充电冷却都在进程内，多实例部署需要换成分布式锁 / 共享缓存。
-- **tick 周期**：`fixedDelay` 下实际周期 = 1s + 本轮耗时，tick 变慢时车辆移动节奏随之顺延，不补拍。
-- **可选索引**：`sql/optional_indexes.sql` 提供数据量增大后的索引建议（属表结构变更，默认未执行）。
-- **地图保存依赖当前地图**：`saveMap` 以现有 `is_current = 1` 的地图为基础创建新版本，首次使用需先准备一条初始地图数据。
+- **无鉴权**：接口没有登录与权限校验，CORS 全放开，请勿直接暴露到公网。
+- **车辆之间不避让**：规划时其它车辆的占用路径按可通行处理，多车路径可以重叠。启用真正的避让需要同时设计对向会车与死锁处理。
+- **单实例**：车锁、地图缓存、自动充电冷却都在进程内，多实例部署需换成分布式锁与共享缓存。
+- **tick 周期会顺延**：实际周期为 1 秒加本轮耗时，负载高时车辆移动节奏变慢，不补拍。
+- **地图保存依赖当前版本**：`/map/save` 以现有 `is_current = 1` 的地图为基础，空库需先执行 `sql/agv_system.sql`。
+- **碰撞检测未接入**：`AgvCollisionAvoidance` 只是工具类，仿真循环未调用。
+- **仿真逻辑**：移动、耗电、充电均为模拟，接入真实车辆需替换 `AgvSimulator` 与车辆控制层。
+- **时间口径不统一**：`lastUpdate` 是 UTC 的 ISO8601 字符串，任务与日志时间是服务器本地时间的 `DATETIME`。
+- **端口冲突**：Sentinel Dashboard 默认配置为 `localhost:8080`，与网关同端口，启用 Sentinel 前需改其中一个。
+- **默认凭据**：`application.yml` 中数据库账号为 `root/root`，仅供本地开发。
+- **可选索引**：任务 / 日志数据量增大后，可评估执行 `sql/optional_indexes.sql`（表结构变更，默认未执行）。
+
+---
+
+## 更新记录
+
+### 2026-11 · 仿真循环性能优化
+
+- 全局锁改为每车一把锁；多表写加事务；车辆 / 任务只写变化；地图与寻路网格缓存；占用路径批量写入。
+- 自动充电由服务内 HTTP 自调用改为本地调用并加冷却；tick 调度由 cron 改为 fixedDelay。
+- 新增 `agv.sim.*` 配置项、仿真单元测试与 `scripts/bench-tick.mjs`。
+- 行为变化：路径节点只返回 `x` / `y`；分页 `pageSize` 上限 100；空闲车 `lastUpdate` 不再每秒刷新；
+  A* 无解只让该任务失败，不再中断整轮 tick；充电任务记录实际前往的充电站。
+
+### 2026-11 · V2 / V2.1 前端联调
+
+- 新增路径预览 `/agv/preview`、实时快照 `/agv/live`（304）、SSE `/agv/stream`。
+- 批量加车改为连续编号并直接入库；任务 / 日志分页支持服务端过滤。
+- 修复 `/agv/report` 清空任务、`Node` 反序列化 500、空路径 NPE、无任务启停 500、CORS 预检等问题。
+- 新增 `sql/agv_system.sql` 与无 Nacos 启动脚本 `scripts/start-backend.ps1`（密码从环境变量读取）。
 
 ---
 
 ## License
 
-本项目未声明开源许可证；如需对外分发，请先补充 `LICENSE` 文件并确认依赖许可证兼容性。
+本项目尚未声明开源许可证；如需对外分发，请先补充 `LICENSE` 并确认依赖许可证兼容性。
